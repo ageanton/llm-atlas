@@ -1,21 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  formatRegisterName,
+  LEVEL_SPECS,
+  PRESET_PROMPTS,
+} from './content/atlasContent';
 import { GUIDED_TOURS } from './content/tours';
-import { PRESET_PROMPTS } from './content/atlasContent';
-import { createEngineClient, type TransformerEngineClient } from './engine/client';
+import { TransformerEngineClient } from './engine/client';
 import type {
   AblationConfig,
   EngineInitResult,
   EngineTraceResult,
-  TrainingReplayData,
 } from './engine/types';
 import { ExplanationPanel } from './panels/ExplanationPanel';
-import { TeachingModePanel } from './panels/TeachingModes';
+import {
+  TeachingModePanel,
+  type TrainingReplayData,
+} from './panels/TeachingModes';
 import { Level0View, Level1View, Level2View } from './scene/Levels012';
 import { Level3View, Level4View, Level5View } from './scene/Levels345';
 import {
   clampLevel,
-  DEFAULT_PROMPT,
-  DEFAULT_SELECTION,
+  hasActiveAblation,
   parseSelection,
   stateFromUrl,
   stateToSearch,
@@ -55,109 +60,106 @@ export function App() {
     }
   }, [state]);
 
-  // Handle browser back/forward buttons
+  // Initialize worker + load real weights & training replay
   useEffect(() => {
-    const onPopState = () => {
-      setState(stateFromUrl(window.location.search));
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-
-  // Initialize Web Worker and load real model
-  useEffect(() => {
-    let client: TransformerEngineClient;
-    try {
-      client = createEngineClient();
-      clientRef.current = client;
-    } catch (err) {
-      setError(`Failed to create worker: ${(err as Error).message}`);
-      return;
-    }
+    const client = new TransformerEngineClient();
+    clientRef.current = client;
+    const modelBaseUrl = new URL(
+      `${import.meta.env.BASE_URL}model/`,
+      window.location.origin
+    ).href;
 
     client
-      .init()
-      .then((info) => {
-        setInitInfo(info);
-      })
-      .catch((err) => {
-        setError(`Failed to load real model weights: ${(err as Error).message}`);
-      });
+      .init(modelBaseUrl)
+      .then((info) => setInitInfo(info))
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : String(err))
+      );
 
-    client
-      .getReplay()
+    fetch(`${modelBaseUrl}training_replay.json`)
+      .then((res) => (res.ok ? res.json() : null))
       .then((data: TrainingReplayData | null) => {
-        setReplay(data);
+        if (data) setReplay(data);
       })
       .catch(() => undefined);
 
     return () => {
-      client.terminate();
+      client.dispose();
+      clientRef.current = null;
     };
   }, []);
 
-  // Run forward pass whenever prompt changes
+  // Re-run real forward pass whenever prompt or ablation changes
   useEffect(() => {
     const client = clientRef.current;
-    if (!client || !initInfo || !state.prompt) return;
-
-    let cancelled = false;
+    if (!client || !initInfo) return;
+    let alive = true;
     setBusy(true);
+    setError(null);
 
-    client
-      .run(state.prompt)
-      .then((res) => {
-        if (!cancelled) {
-          setBaseline(res);
-          setBusy(false);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(`Inference failed: ${(err as Error).message}`);
-          setBusy(false);
-        }
-      });
+    const run = async () => {
+      try {
+        const baseRes = await client.trace(state.prompt);
+        if (!alive) return;
+        setBaseline(baseRes);
 
-    return () => {
-      cancelled = true;
+        if (hasActiveAblation(state.ablation)) {
+          const ablRes = await client.trace(state.prompt, state.ablation);
+          if (!alive) return;
+          setAblated(ablRes);
+        } else {
+          setAblated(null);
+        }
+      } catch (err) {
+        if (alive) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        if (alive) setBusy(false);
+      }
     };
-  }, [initInfo, state.prompt]);
 
-  // Run ablated forward pass when ablation changes
-  useEffect(() => {
-    const client = clientRef.current;
-    if (!client || !initInfo || !state.prompt) return;
-
-    const hasAb =
-      Boolean(state.ablation.zeroBlocks?.length) ||
-      Boolean(state.ablation.zeroMlpLayers?.length) ||
-      Boolean(state.ablation.zeroHeads?.length) ||
-      state.ablation.freezePosition !== undefined;
-
-    if (!hasAb) {
-      setAblated(null);
-      return;
-    }
-
-    let cancelled = false;
-    client
-      .run(state.prompt, state.ablation)
-      .then((res) => {
-        if (!cancelled) setAblated(res);
-      })
-      .catch(() => undefined);
-
+    void run();
     return () => {
-      cancelled = true;
+      alive = false;
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  // Keyboard navigation
+  const setLevel = useCallback((lv: ZoomLevel) => {
+    setState((prev) => ({ ...prev, level: lv }));
+  }, []);
+
+  const setRegister = useCallback((register: Register) => {
+    setState((prev) => ({ ...prev, register }));
+  }, []);
+
+  const setMode = useCallback((mode: TeachingMode) => {
+    setState((prev) => ({ ...prev, mode }));
+  }, []);
+
+  const handleSelect = useCallback((sel: string, zoomIn = false) => {
+    setState((prev) => ({
+      ...prev,
+      sel,
+      level: zoomIn ? clampLevel(prev.level + 1) : prev.level,
+    }));
+  }, []);
+
+  const handleAblationChange = useCallback((ablation: AblationConfig) => {
+    setState((prev) => ({ ...prev, ablation }));
+  }, []);
+
+  // Keyboard navigation across the semantic zoom tree
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const onKey = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      if (
+        activeEl instanceof HTMLInputElement ||
+        activeEl instanceof HTMLTextAreaElement ||
+        activeEl instanceof HTMLSelectElement
+      ) {
+        return;
+      }
 
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
@@ -174,47 +176,27 @@ export function App() {
           setMode('explore');
         } else if (state.tourId) {
           e.preventDefault();
-          endTour();
+          setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }));
         }
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [state.level, state.mode, state.tourId]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [state.level, state.mode, state.tourId, setLevel, setMode]);
 
-  // Semantic Zoom on wheel (locked with debounce)
-  const handleWheel = (e: React.WheelEvent) => {
-    if (Math.abs(e.deltaY) < 40) return;
+  // Semantic zoom via mouse wheel with rate-limiting lock
+  const handleSceneWheel = (e: React.WheelEvent) => {
+    if (Math.abs(e.deltaY) < 35) return;
     const now = Date.now();
-    if (now - wheelLockRef.current < 260) return;
+    if (now - wheelLockRef.current < 280) return;
     wheelLockRef.current = now;
 
     if (e.deltaY > 0 && state.level < 5) {
-      setLevel((state.level + 1) as ZoomLevel);
+      setLevel(clampLevel(state.level + 1));
     } else if (e.deltaY < 0 && state.level > 0) {
-      setLevel((state.level - 1) as ZoomLevel);
+      setLevel(clampLevel(state.level - 1));
     }
-  };
-
-  const setLevel = (lv: ZoomLevel) => {
-    setState((prev) => ({ ...prev, level: lv }));
-  };
-
-  const setRegister = (r: Register) => {
-    setState((prev) => ({ ...prev, register: r }));
-  };
-
-  const setMode = (m: TeachingMode) => {
-    setState((prev) => ({ ...prev, mode: m }));
-  };
-
-  const handleSelect = (sel: string, zoomLevel5 = false) => {
-    setState((prev) => ({
-      ...prev,
-      sel,
-      level: zoomLevel5 ? 5 : prev.level,
-    }));
   };
 
   const handlePromptSubmit = (e: React.FormEvent) => {
@@ -224,28 +206,24 @@ export function App() {
     }
   };
 
-  const selectPreset = (p: string) => {
-    setDraftPrompt(p);
-    setState((prev) => ({ ...prev, prompt: p }));
+  const applyPreset = (text: string) => {
+    setDraftPrompt(text);
+    setState((prev) => ({ ...prev, prompt: text }));
   };
 
-  const handleAblationChange = (next: AblationConfig) => {
-    setState((prev) => ({ ...prev, ablation: next }));
-  };
-
-  const copyShareLink = async () => {
+  const copyShareUrl = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     } catch {
-      // Fallback
+      // Ignore clipboard write failures
     }
   };
 
   const activeTour = useMemo(() => {
     if (!state.tourId) return null;
-    return GUIDED_TOURS.find((t) => t.id === state.tourId) || null;
+    return GUIDED_TOURS.find((t) => t.id === state.tourId) ?? null;
   }, [state.tourId]);
 
   const startTour = (tourId: string) => {
@@ -260,16 +238,17 @@ export function App() {
       sel: first.sel,
       register: first.register,
       mode: first.mode,
-      prompt: first.prompt || prev.prompt,
+      prompt: first.prompt ?? prev.prompt,
     }));
     if (first.prompt) setDraftPrompt(first.prompt);
   };
 
-  const nextTourStep = () => {
+  const advanceTour = (delta: number) => {
     if (!activeTour) return;
-    const nextIdx = state.tourStep + 1;
+    const nextIdx = state.tourStep + delta;
+    if (nextIdx < 0) return;
     if (nextIdx >= activeTour.steps.length) {
-      endTour();
+      setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }));
       return;
     }
     const step = activeTour.steps[nextIdx];
@@ -280,96 +259,78 @@ export function App() {
       sel: step.sel,
       register: step.register,
       mode: step.mode,
-      prompt: step.prompt || prev.prompt,
+      prompt: step.prompt ?? prev.prompt,
     }));
     if (step.prompt) setDraftPrompt(step.prompt);
-  };
-
-  const prevTourStep = () => {
-    if (!activeTour || state.tourStep <= 0) return;
-    const prevIdx = state.tourStep - 1;
-    const step = activeTour.steps[prevIdx];
-    setState((prev) => ({
-      ...prev,
-      tourStep: prevIdx,
-      level: step.level,
-      sel: step.sel,
-      register: step.register,
-      mode: step.mode,
-      prompt: step.prompt || prev.prompt,
-    }));
-    if (step.prompt) setDraftPrompt(step.prompt);
-  };
-
-  const endTour = () => {
-    setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }));
   };
 
   const target = useMemo(() => parseSelection(state.sel), [state.sel]);
   const activeTrace = ablated || baseline;
 
   return (
-    <div className="app-container">
-      <header className="app-header">
-        <div className="header-brand">
-          <span className="app-title">LLM Atlas</span>
-          <span className="param-badge mono">866K Parameters · Real Weights</span>
+    <div className="atlas-app">
+      <header className="atlas-topbar">
+        <div className="topbar-left">
+          <span className="atlas-brand">LLM Atlas</span>
+          <span className="truth-badge mono">
+            {initInfo
+              ? `${initInfo.manifest.total_params.toLocaleString()} params · float16 truth`
+              : '866K params · real weights'}
+          </span>
         </div>
 
         {activeTour ? (
-          <div className="header-tour-controls">
-            <div className="tour-nav-box">
-              <span className="badge-chip mono">Tour: {activeTour.title}</span>
-              <span className="mono">
-                Step {state.tourStep + 1} of {activeTour.steps.length}
-              </span>
-              <button
-                type="button"
-                className="seg-btn"
-                onClick={prevTourStep}
-                disabled={state.tourStep === 0}
-              >
-                ← Back
-              </button>
-              <button
-                type="button"
-                className="seg-btn is-active"
-                onClick={nextTourStep}
-              >
-                {state.tourStep === activeTour.steps.length - 1 ? 'Finish' : 'Next →'}
-              </button>
-              <button type="button" className="seg-btn" onClick={endTour}>
-                Exit Tour
-              </button>
-            </div>
-            <p className="tour-step-msg">
-              {activeTour.steps[state.tourStep]?.message}
-            </p>
+          <div className="topbar-tour">
+            <span className="tour-badge mono">
+              Tour: {activeTour.title} ({state.tourStep + 1}/{activeTour.steps.length})
+            </span>
+            <button
+              type="button"
+              className="seg-btn"
+              disabled={state.tourStep === 0}
+              onClick={() => advanceTour(-1)}
+            >
+              ← Prev
+            </button>
+            <button
+              type="button"
+              className="seg-btn is-active"
+              onClick={() => advanceTour(1)}
+            >
+              {state.tourStep === activeTour.steps.length - 1 ? 'Finish' : 'Next →'}
+            </button>
+            <button
+              type="button"
+              className="seg-btn"
+              onClick={() => setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }))}
+            >
+              Exit
+            </button>
           </div>
         ) : (
-          <div className="header-tour-controls">
+          <div className="topbar-tour">
             <select
-              className="select-input"
+              className="tour-select"
               value=""
               onChange={(e) => {
                 if (e.target.value) startTour(e.target.value);
               }}
             >
-              <option value="">Start Guided Tour...</option>
+              <option value="">Start a guided tour...</option>
               {GUIDED_TOURS.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.title} ({t.steps.length} steps)
+                  {t.title}
                 </option>
               ))}
             </select>
           </div>
         )}
 
-        <div className="header-actions">
+        <div className="topbar-right">
           <button
             type="button"
             className="seg-btn"
-            onClick={copyShareLink}
+            onClick={copyShareUrl}
             title="Copy deep-linked URL to clipboard"
           >
             {copiedLink ? 'Link Copied!' : 'Share URL'}
@@ -385,24 +346,23 @@ export function App() {
         </div>
       </header>
 
-      <nav className="app-toolbar" aria-label="Explorer navigation">
-        <div className="zoom-level-nav">
-          <span className="nav-label mono">Zoom Level:</span>
+      <nav className="atlas-subbar" aria-label="Explorer navigation">
+        <div className="nav-group zoom-group">
+          <span className="group-label mono">Level:</span>
           {LEVELS.map((lv) => (
             <button
               key={lv}
               type="button"
               className={`seg-btn mono ${state.level === lv ? 'is-active' : ''}`}
               onClick={() => setLevel(lv)}
-              title={`Zoom to Level ${lv}`}
             >
               L{lv}
             </button>
           ))}
         </div>
 
-        <div className="teaching-mode-nav">
-          <span className="nav-label mono">Mode:</span>
+        <div className="nav-group mode-group">
+          <span className="group-label mono">Mode:</span>
           {(['explore', 'ablate', 'replay', 'sampling', 'inspector', 'scale'] as TeachingMode[]).map(
             (m) => (
               <button
@@ -417,8 +377,8 @@ export function App() {
           )}
         </div>
 
-        <div className="register-nav">
-          <span className="nav-label mono">Register:</span>
+        <div className="nav-group register-group">
+          <span className="group-label mono">Register:</span>
           {REGISTERS.map((r) => (
             <button
               key={r}
@@ -426,21 +386,21 @@ export function App() {
               className={`seg-btn mono ${state.register === r ? 'is-active' : ''}`}
               onClick={() => setRegister(r)}
             >
-              {r}
+              {formatRegisterName(r)}
             </button>
           ))}
         </div>
       </nav>
 
-      <section className="prompt-bar" aria-label="Input prompt">
-        <span className="prompt-bar-label mono">Presets:</span>
-        <div className="prompt-chips-row">
+      <div className="prompt-toolbar">
+        <div className="prompt-presets">
+          <span className="preset-label mono">Presets:</span>
           {PRESET_PROMPTS.map((p) => (
             <button
               key={p.id}
               type="button"
-              className={`preset-chip ${state.prompt === p.text ? 'is-active' : ''}`}
-              onClick={() => selectPreset(p.text)}
+              className={`preset-pill ${state.prompt === p.text ? 'is-active' : ''}`}
+              onClick={() => applyPreset(p.text)}
               title={p.note}
             >
               {p.label}
@@ -448,33 +408,59 @@ export function App() {
           ))}
         </div>
 
-        <form onSubmit={handlePromptSubmit} className="prompt-custom-form">
+        <form onSubmit={handlePromptSubmit} className="prompt-form">
           <input
-            type="text"
             className="prompt-input"
             value={draftPrompt}
             onChange={(e) => setDraftPrompt(e.target.value)}
             placeholder="Type your own story prompt..."
+            aria-label="Prompt text"
           />
-          <button type="submit" className="prompt-submit-btn" disabled={busy}>
+          <button type="submit" className="seg-btn is-active" disabled={busy}>
             {busy ? 'Running...' : 'Run'}
           </button>
         </form>
-      </section>
 
-      {error && (
-        <div className="error-banner" role="alert">
-          <b>Error:</b> {error}
-        </div>
-      )}
+        {activeTrace && (
+          <div className="live-token-ribbon">
+            <span className="ribbon-label mono">Input:</span>
+            {activeTrace.tokens.map((tok, idx) => (
+              <span
+                key={`${tok.start}-${idx}`}
+                className={`ribbon-token mono ${hoveredTokenIdx === idx ? 'is-hovered' : ''}`}
+                onMouseEnter={() => setHoveredTokenIdx(idx)}
+                onMouseLeave={() => setHoveredTokenIdx(null)}
+                title={`Token #${tok.id}, characters ${tok.start}..${tok.end}`}
+              >
+                {formatToken(tok.text)}
+              </span>
+            ))}
+            <span className="l0-meta mono">
+              {activeTrace.elapsedMs}ms ·{' '}
+              {hasActiveAblation(state.ablation) ? 'ablated trace' : 'real forward pass'}
+            </span>
+          </div>
+        )}
+      </div>
 
-      <div className="app-main-layout">
-        <main
-          className="scene-viewport"
-          onWheel={handleWheel}
-          aria-label="Interactive Transformer Scene"
-        >
-          {!initInfo || !activeTrace ? (
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="atlas-workspace">
+        <nav className="level-rail" aria-label="Semantic zoom levels">
+          {LEVELS.map((lv) => (
+            <button
+              key={lv}
+              type="button"
+              className={`rail-btn ${state.level === lv ? 'is-current' : ''}`}
+              onClick={() => setLevel(lv)}
+            >
+              {LEVEL_SPECS[lv].shortName}
+            </button>
+          ))}
+        </nav>
+
+        <main className="scene-column" onWheel={handleSceneWheel}>
+          {!initInfo || !activeTrace || !baseline ? (
             <div className="empty-notice">
               Loading real miniature transformer weights (1.65 MB)...
             </div>
