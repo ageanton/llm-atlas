@@ -1,3 +1,4 @@
+# Triggered deployment
 name: Verify Parity & Deploy to GitHub Pages
 
 on:
