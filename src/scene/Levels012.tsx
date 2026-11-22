@@ -1,12 +1,11 @@
 import type {
-  ActiveLayerTrace,
   EncodedToken,
   ModelManifest,
   TokenizerData,
   Trace,
 } from '../engine/types';
 import type { Register, SelectionTarget } from '../state/urlState';
-import { formatNum, formatToken, vectorL2Norm } from '../utils/color';
+import { formatToken, vectorL2Norm } from '../utils/color';
 
 interface Level0Props {
   prompt: string;
@@ -131,7 +130,7 @@ export function Level1View({
 
         <div className="highway-link" aria-hidden="true" />
 
-        {trace.layers.map((layer, idx) => {
+        {trace.layers.map((_, idx) => {
           const lens = trace.logitLens[idx];
           const topLens = lens?.topTokens[0];
           const lensWord = topLens ? tokenizer.vocab[topLens.id] : '—';
@@ -214,8 +213,8 @@ export function Level2View({
   tokens,
   trace,
   manifest,
+  register: _register,
   target,
-  register,
   onSelect,
 }: Level2Props) {
   const layerIdx = target.layer;
