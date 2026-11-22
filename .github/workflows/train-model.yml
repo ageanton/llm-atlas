@@ -1,0 +1,50 @@
+name: Train Miniature Transformer
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fast (~2 min smoke test) or full (~10-15 min real model)"
+        required: true
+        default: "fast"
+        type: choice
+        options:
+          - fast
+          - full
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lightweight CPU PyTorch and dependencies
+        run: |
+          pip install --no-cache-dir torch --index-url [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)
+          pip install --no-cache-dir numpy datasets
+
+      - name: Train model and export static artifacts
+        working-directory: model
+        run: |
+          if [ "${{ inputs.mode }}" = "fast" ]; then
+            python train_and_export.py --fast
+          else
+            python train_and_export.py --steps 2000 --train-stories 12000 --val-stories 400
+          fi
+
+      - name: Commit trained weights and traces back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/model
+          git diff --staged --quiet || git commit -m "Export trained miniature transformer (${{ inputs.mode }})"
+          git push
