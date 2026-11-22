@@ -1,66 +1,102 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { NumbersOverlay } from './components/NumbersOverlay';
 import {
-  formatRegisterName,
-  LEVEL_SPECS,
+  LEVEL_CONTENT,
   PRESET_PROMPTS,
+  registerLabel,
 } from './content/atlasContent';
-import { GUIDED_TOURS } from './content/tours';
 import { TransformerEngineClient } from './engine/client';
-import type {
-  AblationConfig,
-  EngineInitResult,
-  EngineTraceResult,
-} from './engine/types';
-import { ExplanationPanel } from './panels/ExplanationPanel';
-import {
-  TeachingModePanel,
-  type TrainingReplayData,
-} from './panels/TeachingModes';
-import { Level0View, Level1View, Level2View } from './scene/Levels012';
-import { Level3View, Level4View, Level5View } from './scene/Levels345';
+import type { EngineInitResult, EngineTraceResult } from './engine/types';
+import { studioSound } from './scene/sound';
+import { TransformerWorld } from './scene/TransformerWorld';
 import {
   clampLevel,
   hasActiveAblation,
-  parseSelection,
+  isHeadDisabled,
   stateFromUrl,
   stateToSearch,
+  toggleHeadAblation,
   type AtlasState,
   type Register,
-  type TeachingMode,
   type ZoomLevel,
 } from './state/urlState';
-import { formatToken } from './utils/color';
 
-const LEVELS: ZoomLevel[] = [0, 1, 2, 3, 4, 5];
-const REGISTERS: Register[] = ['simple', 'sufficient', 'complete'];
+const REGISTERS: Register[] = ['kid', 'curious', 'deep'];
+const LEVELS: ZoomLevel[] = [0, 1, 2, 3];
 
 export function App() {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const worldRef = useRef<TransformerWorld | null>(null);
   const clientRef = useRef<TransformerEngineClient | null>(null);
-  const wheelLockRef = useRef<number>(0);
 
   const [state, setState] = useState<AtlasState>(() =>
     stateFromUrl(window.location.search)
   );
   const [draftPrompt, setDraftPrompt] = useState<string>(state.prompt);
   const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
-  const [replay, setReplay] = useState<TrainingReplayData | null>(null);
   const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
   const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
   const [hoveredTokenIdx, setHoveredTokenIdx] = useState<number | null>(null);
-  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [captionOpen, setCaptionOpen] = useState<boolean>(true);
+  const [muted, setMuted] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync state to URL cleanly
+  // Keep shareable URL in sync
   useEffect(() => {
     const nextSearch = stateToSearch(state);
     if (window.location.search !== nextSearch) {
-      window.history.replaceState(null, '', `${window.location.pathname}${nextSearch}`);
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${nextSearch}`
+      );
     }
   }, [state]);
 
-  // Initialize worker + load real weights & training replay
+  // Mount Three.js sunlit studio once
+  useEffect(() => {
+    const el = mountRef.current;
+    if (!el) return;
+
+    const world = new TransformerWorld(el, {
+      onSelectLevel: (level) => {
+        setState((prev) => ({ ...prev, level }));
+      },
+      onSelectChamber: (layer, zoomIn) => {
+        setState((prev) => ({
+          ...prev,
+          layer,
+          level: zoomIn ? 2 : prev.level,
+        }));
+      },
+      onSelectHead: (head) => {
+        setState((prev) => ({
+          ...prev,
+          head,
+          level: prev.level === 2 ? 3 : prev.level,
+        }));
+      },
+      onToggleHeadAblation: (layer, head) => {
+        setState((prev) => ({
+          ...prev,
+          ablation: toggleHeadAblation(prev.ablation, layer, head),
+        }));
+      },
+      onHoverToken: (idx) => {
+        setHoveredTokenIdx(idx);
+      },
+    });
+    worldRef.current = world;
+
+    return () => {
+      world.dispose();
+      worldRef.current = null;
+    };
+  }, []);
+
+  // Boot the verified Milestone 2 Web Worker and load real weights
   useEffect(() => {
     const client = new TransformerEngineClient();
     clientRef.current = client;
@@ -76,20 +112,13 @@ export function App() {
         setError(err instanceof Error ? err.message : String(err))
       );
 
-    fetch(`${modelBaseUrl}training_replay.json`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: TrainingReplayData | null) => {
-        if (data) setReplay(data);
-      })
-      .catch(() => undefined);
-
     return () => {
       client.dispose();
       clientRef.current = null;
     };
   }, []);
 
-  // Re-run real forward pass whenever prompt or ablation changes
+  // Recompute real forward pass & real ablation diff whenever prompt or ablation changes
   useEffect(() => {
     const client = clientRef.current;
     if (!client || !initInfo) return;
@@ -125,449 +154,369 @@ export function App() {
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  const setLevel = useCallback((lv: ZoomLevel) => {
-    setState((prev) => ({ ...prev, level: lv }));
-  }, []);
+  // Push real data snapshot into the 3D world
+  useEffect(() => {
+    if (!worldRef.current || !initInfo || !baseline) return;
+    worldRef.current.update({
+      level: state.level,
+      layer: state.layer,
+      head: state.head,
+      register: state.register,
+      ablation: state.ablation,
+      baseline,
+      ablated,
+      tokenizer: initInfo.tokenizer,
+      hoveredTokenIdx,
+    });
+  }, [
+    initInfo,
+    baseline,
+    ablated,
+    state.level,
+    state.layer,
+    state.head,
+    state.register,
+    state.ablation,
+    hoveredTokenIdx,
+  ]);
 
-  const setRegister = useCallback((register: Register) => {
-    setState((prev) => ({ ...prev, register }));
-  }, []);
+  useEffect(() => {
+    worldRef.current?.setHoveredToken(hoveredTokenIdx);
+  }, [hoveredTokenIdx]);
 
-  const setMode = useCallback((mode: TeachingMode) => {
-    setState((prev) => ({ ...prev, mode }));
-  }, []);
-
-  const handleSelect = useCallback((sel: string, zoomIn = false) => {
-    setState((prev) => ({
-      ...prev,
-      sel,
-      level: zoomIn ? clampLevel(prev.level + 1) : prev.level,
-    }));
-  }, []);
-
-  const handleAblationChange = useCallback((ablation: AblationConfig) => {
-    setState((prev) => ({ ...prev, ablation }));
-  }, []);
-
-  // Keyboard navigation across the semantic zoom tree
+  // Keyboard shortcuts: Enter/+ zoom in, Esc/- zoom out, 1/2/3 lens
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const activeEl = document.activeElement;
-      if (
-        activeEl instanceof HTMLInputElement ||
-        activeEl instanceof HTMLTextAreaElement ||
-        activeEl instanceof HTMLSelectElement
-      ) {
-        return;
-      }
-
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        setLevel(clampLevel(state.level - 1));
-      } else if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setLevel(clampLevel(state.level + 1));
-      } else if (['0', '1', '2', '3', '4', '5'].includes(e.key)) {
-        e.preventDefault();
-        setLevel(Number.parseInt(e.key, 10) as ZoomLevel);
-      } else if (e.key === 'Escape') {
-        if (state.mode !== 'explore') {
-          e.preventDefault();
-          setMode('explore');
-        } else if (state.tourId) {
-          e.preventDefault();
-          setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }));
-        }
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'Enter' || e.key === '=' || e.key === '+') {
+        setState((prev) => ({ ...prev, level: clampLevel(prev.level + 1) }));
+      } else if (e.key === 'Escape' || e.key === '-') {
+        setState((prev) => ({
+          ...prev,
+          showNumbers: false,
+          level: clampLevel(prev.level - 1),
+        }));
+      } else if (e.key === '1') {
+        setState((prev) => ({ ...prev, register: 'kid' }));
+      } else if (e.key === '2') {
+        setState((prev) => ({ ...prev, register: 'curious' }));
+      } else if (e.key === '3') {
+        setState((prev) => ({ ...prev, register: 'deep' }));
       }
     };
-
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [state.level, state.mode, state.tourId, setLevel, setMode]);
+  }, []);
 
-  // Semantic zoom via mouse wheel with rate-limiting lock
-  const handleSceneWheel = (e: React.WheelEvent) => {
-    if (Math.abs(e.deltaY) < 35) return;
-    const now = Date.now();
-    if (now - wheelLockRef.current < 280) return;
-    wheelLockRef.current = now;
+  const setLevel = useCallback((level: ZoomLevel) => {
+    setState((prev) => ({ ...prev, level, showNumbers: false }));
+  }, []);
 
-    if (e.deltaY > 0 && state.level < 5) {
-      setLevel(clampLevel(state.level + 1));
-    } else if (e.deltaY < 0 && state.level > 0) {
-      setLevel(clampLevel(state.level - 1));
-    }
+  const content = LEVEL_CONTENT[state.level];
+  const activeTrace = ablated ?? baseline;
+  const ablationOn = hasActiveAblation(state.ablation);
+
+  const breadcrumbs = useMemo(() => {
+    const items: { label: string; level: ZoomLevel }[] = [
+      { label: 'Machine', level: 0 },
+    ];
+    if (state.level >= 1) items.push({ label: 'Factory', level: 1 });
+    if (state.level >= 2)
+      items.push({ label: `Chamber ${state.layer}`, level: 2 });
+    if (state.level >= 3)
+      items.push({ label: `Head ${state.head}`, level: 3 });
+    return items;
+  }, [state.level, state.layer, state.head]);
+
+  const toggleSound = () => {
+    const next = !muted;
+    setMuted(next);
+    studioSound.setMuted(next);
   };
 
-  const handlePromptSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (draftPrompt.trim()) {
-      setState((prev) => ({ ...prev, prompt: draftPrompt.trim() }));
-    }
-  };
-
-  const applyPreset = (text: string) => {
-    setDraftPrompt(text);
-    setState((prev) => ({ ...prev, prompt: text }));
-  };
-
-  const copyShareUrl = async () => {
+  const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
     } catch {
-      // Ignore clipboard write failures
+      setCopied(false);
     }
   };
-
-  const activeTour = useMemo(() => {
-    if (!state.tourId) return null;
-    return GUIDED_TOURS.find((t) => t.id === state.tourId) ?? null;
-  }, [state.tourId]);
-
-  const startTour = (tourId: string) => {
-    const tour = GUIDED_TOURS.find((t) => t.id === tourId);
-    if (!tour || tour.steps.length === 0) return;
-    const first = tour.steps[0];
-    setState((prev) => ({
-      ...prev,
-      tourId,
-      tourStep: 0,
-      level: first.level,
-      sel: first.sel,
-      register: first.register,
-      mode: first.mode,
-      prompt: first.prompt ?? prev.prompt,
-    }));
-    if (first.prompt) setDraftPrompt(first.prompt);
-  };
-
-  const advanceTour = (delta: number) => {
-    if (!activeTour) return;
-    const nextIdx = state.tourStep + delta;
-    if (nextIdx < 0) return;
-    if (nextIdx >= activeTour.steps.length) {
-      setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }));
-      return;
-    }
-    const step = activeTour.steps[nextIdx];
-    setState((prev) => ({
-      ...prev,
-      tourStep: nextIdx,
-      level: step.level,
-      sel: step.sel,
-      register: step.register,
-      mode: step.mode,
-      prompt: step.prompt ?? prev.prompt,
-    }));
-    if (step.prompt) setDraftPrompt(step.prompt);
-  };
-
-  const target = useMemo(() => parseSelection(state.sel), [state.sel]);
-  const activeTrace = ablated || baseline;
 
   return (
-    <div className="atlas-app">
-      <header className="atlas-topbar">
-        <div className="topbar-left">
-          <span className="atlas-brand">LLM Atlas</span>
-          <span className="truth-badge mono">
-            {initInfo
-              ? `${initInfo.manifest.total_params.toLocaleString()} params · float16 truth`
-              : '866K params · real weights'}
-          </span>
+    <div className="studio-viewport">
+      <div
+        ref={mountRef}
+        className="canvas-mount"
+        aria-label="Interactive 3D miniature transformer studio"
+      />
+
+      {!initInfo && !error && (
+        <div className="loading-pill glass-panel">
+          Waking up the miniature transformer (862,464 real parameters)...
         </div>
+      )}
 
-        {activeTour ? (
-          <div className="topbar-tour">
-            <span className="tour-badge mono">
-              Tour: {activeTour.title} ({state.tourStep + 1}/{activeTour.steps.length})
+      {error && <div className="error-toast">{error}</div>}
+
+      {/* Top Floating Chrome */}
+      <header className="hud-top">
+        <nav className="hud-pill-row glass-panel" aria-label="Breadcrumb">
+          <span className="brand-title">LLM Atlas</span>
+          {breadcrumbs.map((crumb, idx) => (
+            <span key={crumb.level} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              {idx > 0 && <span className="crumb-sep">›</span>}
+              <button
+                type="button"
+                className={`crumb-btn ${crumb.level === state.level ? 'is-current' : ''}`}
+                onClick={() => setLevel(crumb.level)}
+              >
+                {crumb.label}
+              </button>
             </span>
-            <button
-              type="button"
-              className="seg-btn"
-              disabled={state.tourStep === 0}
-              onClick={() => advanceTour(-1)}
-            >
-              ← Prev
-            </button>
-            <button
-              type="button"
-              className="seg-btn is-active"
-              onClick={() => advanceTour(1)}
-            >
-              {state.tourStep === activeTour.steps.length - 1 ? 'Finish' : 'Next →'}
-            </button>
-            <button
-              type="button"
-              className="seg-btn"
-              onClick={() => setState((prev) => ({ ...prev, tourId: null, tourStep: 0 }))}
-            >
-              Exit
-            </button>
-          </div>
-        ) : (
-          <div className="topbar-tour">
-            <select
-              className="tour-select"
-              value=""
-              onChange={(e) => {
-                if (e.target.value) startTour(e.target.value);
-              }}
-            >
-              <option value="">Start a guided tour...</option>
-              {GUIDED_TOURS.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.title}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <div className="topbar-right">
+          ))}
           <button
             type="button"
-            className="seg-btn"
-            onClick={copyShareUrl}
-            title="Copy deep-linked URL to clipboard"
+            className={`honesty-dot ${
+              content.honesty.kind === 'literal' ? 'is-literal' : 'is-abstraction'
+            }`}
+            title={content.honesty.detail}
+            onClick={() => {
+              if (content.honesty.literalLevel !== undefined) {
+                setLevel(content.honesty.literalLevel);
+              }
+            }}
           >
-            {copiedLink ? 'Link Copied!' : 'Share URL'}
+            {content.honesty.label}
           </button>
-          <a
-            href="https://github.com/ageanton/llm-atlas"
-            target="_blank"
-            rel="noreferrer"
-            className="seg-btn"
-          >
-            GitHub
-          </a>
+        </nav>
+
+        <div className="hud-pill-row glass-panel">
+          <div className="lens-group" role="group" aria-label="Explanation depth">
+            {REGISTERS.map((r) => (
+              <button
+                key={r}
+                type="button"
+                className={`lens-btn ${state.register === r ? 'is-active' : ''}`}
+                onClick={() => setState((prev) => ({ ...prev, register: r }))}
+              >
+                {registerLabel(r)}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="pill-btn" onClick={toggleSound}>
+            {muted ? 'Sound off' : 'Sound on'}
+          </button>
+          <button type="button" className="pill-btn" onClick={() => void copyLink()}>
+            {copied ? 'Copied' : 'Share'}
+          </button>
         </div>
       </header>
 
-      <nav className="atlas-subbar" aria-label="Explorer navigation">
-        <div className="nav-group zoom-group">
-          <span className="group-label mono">Level:</span>
-          {LEVELS.map((lv) => (
-            <button
-              key={lv}
-              type="button"
-              className={`seg-btn mono ${state.level === lv ? 'is-active' : ''}`}
-              onClick={() => setLevel(lv)}
-            >
-              L{lv}
-            </button>
-          ))}
+      {/* Quiet Floating Explanation Card */}
+      <aside className="caption-card glass-panel" aria-live="polite">
+        <div className="caption-top">
+          <h1 className="caption-title">{content.title}</h1>
+          <button
+            type="button"
+            className="pill-btn"
+            onClick={() => setCaptionOpen((v) => !v)}
+          >
+            {captionOpen ? 'Hide' : 'Read'}
+          </button>
         </div>
 
-        <div className="nav-group mode-group">
-          <span className="group-label mono">Mode:</span>
-          {(['explore', 'ablate', 'replay', 'sampling', 'inspector', 'scale'] as TeachingMode[]).map(
-            (m) => (
+        {captionOpen && (
+          <>
+            <p className="caption-body">{content.copy[state.register]}</p>
+            {state.register === 'kid' && content.simplificationNote && (
+              <p className="caption-note">{content.simplificationNote}</p>
+            )}
+            {content.createsQuestion && content.nextCta && state.level < 3 && (
+              <div className="caption-next">
+                <span className="caption-question">{content.createsQuestion}</span>
+                <button
+                  type="button"
+                  className="cta-btn"
+                  onClick={() => setLevel(clampLevel(state.level + 1))}
+                >
+                  {content.nextCta}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </aside>
+
+      {/* Contextual Tactile Controls for Chambers & Head Orbs */}
+      <div className="play-dock">
+        {state.level >= 2 && (
+          <div className="play-strip glass-panel">
+            <span className="strip-label">Chamber</span>
+            {[0, 1, 2, 3].map((l) => (
               <button
-                key={m}
+                key={l}
                 type="button"
-                className={`seg-btn mono ${state.mode === m ? 'is-active' : ''}`}
-                onClick={() => setMode(m)}
+                className={`pill-btn mono ${state.layer === l ? 'is-active' : ''}`}
+                onClick={() => setState((prev) => ({ ...prev, layer: l }))}
               >
-                {m}
+                {l}
               </button>
-            )
-          )}
-        </div>
+            ))}
+          </div>
+        )}
 
-        <div className="nav-group register-group">
-          <span className="group-label mono">Register:</span>
-          {REGISTERS.map((r) => (
+        {state.level >= 2 && (
+          <div className="play-strip glass-panel">
+            <span className="strip-label">Orbs</span>
+            {[0, 1, 2, 3].map((h) => {
+              const off = isHeadDisabled(state.ablation, state.layer, h);
+              return (
+                <button
+                  key={h}
+                  type="button"
+                  className={`pill-btn mono ${
+                    off ? 'is-warm' : state.head === h ? 'is-active' : ''
+                  }`}
+                  onClick={() => {
+                    studioSound.playTileTap(h);
+                    setState((prev) => ({ ...prev, head: h }));
+                  }}
+                >
+                  H{h} {off ? '(off)' : ''}
+                </button>
+              );
+            })}
             <button
-              key={r}
               type="button"
-              className={`seg-btn mono ${state.register === r ? 'is-active' : ''}`}
-              onClick={() => setRegister(r)}
+              className={`pill-btn ${
+                isHeadDisabled(state.ablation, state.layer, state.head)
+                  ? 'is-warm'
+                  : ''
+              }`}
+              onClick={() => {
+                const currentlyOff = isHeadDisabled(
+                  state.ablation,
+                  state.layer,
+                  state.head
+                );
+                studioSound.playPop(!currentlyOff);
+                setState((prev) => ({
+                  ...prev,
+                  ablation: toggleHeadAblation(
+                    prev.ablation,
+                    prev.layer,
+                    prev.head
+                  ),
+                }));
+              }}
             >
-              {formatRegisterName(r)}
+              {isHeadDisabled(state.ablation, state.layer, state.head)
+                ? `Plug H${state.head} back in`
+                : `Pop out H${state.head}`}
             </button>
-          ))}
-        </div>
-      </nav>
+          </div>
+        )}
 
-      <div className="prompt-toolbar">
-        <div className="prompt-presets">
-          <span className="preset-label mono">Presets:</span>
+        {state.level === 3 && (
+          <div className="play-strip glass-panel">
+            <button
+              type="button"
+              className={`pill-btn ${state.showNumbers ? 'is-active' : ''}`}
+              onClick={() =>
+                setState((prev) => ({ ...prev, showNumbers: !prev.showNumbers }))
+              }
+            >
+              {state.showNumbers ? 'Fold to ribbons' : 'Unfold numbers'}
+            </button>
+            {ablationOn && (
+              <button
+                type="button"
+                className="pill-btn is-warm"
+                onClick={() => {
+                  studioSound.playPop(false);
+                  setState((prev) => ({ ...prev, ablation: {} }));
+                }}
+              >
+                Restore all orbs
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Exact Attention Matrix Overlay (only when user clicks "Unfold numbers") */}
+      {state.level === 3 && state.showNumbers && activeTrace && (
+        <NumbersOverlay
+          tokens={activeTrace.tokens}
+          trace={activeTrace.trace}
+          layer={state.layer}
+          head={state.head}
+          hoveredTokenIdx={hoveredTokenIdx}
+          onHoverToken={setHoveredTokenIdx}
+          onClose={() => setState((prev) => ({ ...prev, showNumbers: false }))}
+        />
+      )}
+
+      {/* Bottom Floating Sentence Pill */}
+      <div className="hud-bottom">
+        <div className="preset-row">
           {PRESET_PROMPTS.map((p) => (
             <button
               key={p.id}
               type="button"
-              className={`preset-pill ${state.prompt === p.text ? 'is-active' : ''}`}
-              onClick={() => applyPreset(p.text)}
-              title={p.note}
+              className={`pill-btn ${state.prompt === p.text ? 'is-active' : ''}`}
+              onClick={() => {
+                studioSound.playTileTap(1);
+                setDraftPrompt(p.text);
+                setState((prev) => ({ ...prev, prompt: p.text }));
+                worldRef.current?.triggerPulse();
+              }}
             >
               {p.label}
             </button>
           ))}
         </div>
 
-        <form onSubmit={handlePromptSubmit} className="prompt-form">
+        <form
+          className="sentence-bar glass-panel"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!draftPrompt.trim()) return;
+            studioSound.playTileTap(2);
+            setState((prev) => ({ ...prev, prompt: draftPrompt }));
+            worldRef.current?.triggerPulse();
+          }}
+        >
           <input
-            className="prompt-input"
+            className="sentence-input"
             value={draftPrompt}
             onChange={(e) => setDraftPrompt(e.target.value)}
-            placeholder="Type your own story prompt..."
-            aria-label="Prompt text"
+            placeholder="Type a short story sentence..."
+            aria-label="Story sentence fed to the miniature transformer"
           />
-          <button type="submit" className="seg-btn is-active" disabled={busy}>
-            {busy ? 'Running...' : 'Run'}
+          <div className="depth-dots" role="group" aria-label="Zoom depth">
+            {LEVELS.map((lv) => (
+              <button
+                key={lv}
+                type="button"
+                className={`depth-dot ${state.level === lv ? 'is-current' : ''}`}
+                title={LEVEL_CONTENT[lv].crumb}
+                aria-label={`Zoom to ${LEVEL_CONTENT[lv].crumb}`}
+                onClick={() => setLevel(lv)}
+              />
+            ))}
+          </div>
+          <button
+            type="submit"
+            className="cta-btn"
+            disabled={busy || !initInfo}
+          >
+            {busy ? 'Thinking...' : 'Play'}
           </button>
         </form>
-
-        {activeTrace && (
-          <div className="live-token-ribbon">
-            <span className="ribbon-label mono">Input:</span>
-            {activeTrace.tokens.map((tok, idx) => (
-              <span
-                key={`${tok.start}-${idx}`}
-                className={`ribbon-token mono ${hoveredTokenIdx === idx ? 'is-hovered' : ''}`}
-                onMouseEnter={() => setHoveredTokenIdx(idx)}
-                onMouseLeave={() => setHoveredTokenIdx(null)}
-                title={`Token #${tok.id}, characters ${tok.start}..${tok.end}`}
-              >
-                {formatToken(tok.text)}
-              </span>
-            ))}
-            <span className="l0-meta mono">
-              {activeTrace.elapsedMs}ms ·{' '}
-              {hasActiveAblation(state.ablation) ? 'ablated trace' : 'real forward pass'}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      <div className="atlas-workspace">
-        <nav className="level-rail" aria-label="Semantic zoom levels">
-          {LEVELS.map((lv) => (
-            <button
-              key={lv}
-              type="button"
-              className={`rail-btn ${state.level === lv ? 'is-current' : ''}`}
-              onClick={() => setLevel(lv)}
-            >
-              {LEVEL_SPECS[lv].shortName}
-            </button>
-          ))}
-        </nav>
-
-        <main className="scene-column" onWheel={handleSceneWheel}>
-          {!initInfo || !activeTrace || !baseline ? (
-            <div className="empty-notice">
-              Loading real miniature transformer weights (1.65 MB)...
-            </div>
-          ) : (
-            <>
-              {state.mode !== 'explore' && clientRef.current && (
-                <TeachingModePanel
-                  mode={state.mode}
-                  ablation={state.ablation}
-                  onChangeAblation={handleAblationChange}
-                  baseline={baseline}
-                  ablated={ablated}
-                  replay={replay}
-                  manifest={initInfo.manifest}
-                  tokenizer={initInfo.tokenizer}
-                  client={clientRef.current}
-                  onInspectScalar={(sel) => {
-                    setState((prev) => ({
-                      ...prev,
-                      mode: 'explore',
-                      level: 5,
-                      sel,
-                    }));
-                  }}
-                  onClose={() => setMode('explore')}
-                />
-              )}
-
-              {state.level === 0 && (
-                <Level0View
-                  tokens={activeTrace.tokens}
-                  trace={activeTrace.trace}
-                  manifest={initInfo.manifest}
-                  tokenizer={initInfo.tokenizer}
-                  register={state.register}
-                  prompt={state.prompt}
-                  onZoomIn={() => setLevel(1)}
-                />
-              )}
-
-              {state.level === 1 && (
-                <Level1View
-                  tokens={activeTrace.tokens}
-                  trace={activeTrace.trace}
-                  manifest={initInfo.manifest}
-                  tokenizer={initInfo.tokenizer}
-                  target={target}
-                  register={state.register}
-                  onSelect={handleSelect}
-                />
-              )}
-
-              {state.level === 2 && (
-                <Level2View
-                  tokens={activeTrace.tokens}
-                  trace={activeTrace.trace}
-                  manifest={initInfo.manifest}
-                  target={target}
-                  register={state.register}
-                  onSelect={handleSelect}
-                />
-              )}
-
-              {state.level === 3 && (
-                <Level3View
-                  tokens={activeTrace.tokens}
-                  trace={activeTrace.trace}
-                  target={target}
-                  register={state.register}
-                  hoveredTokenIdx={hoveredTokenIdx}
-                  onHoverToken={setHoveredTokenIdx}
-                  onSelect={handleSelect}
-                />
-              )}
-
-              {state.level === 4 && clientRef.current && (
-                <Level4View
-                  tokens={activeTrace.tokens}
-                  trace={activeTrace.trace}
-                  manifest={initInfo.manifest}
-                  client={clientRef.current}
-                  target={target}
-                  onSelect={handleSelect}
-                />
-              )}
-
-              {state.level === 5 && clientRef.current && (
-                <Level5View
-                  target={target}
-                  manifest={initInfo.manifest}
-                  client={clientRef.current}
-                  replay={replay}
-                  onSelect={handleSelect}
-                  onOpenReplay={() => setMode('replay')}
-                />
-              )}
-            </>
-          )}
-        </main>
-
-        <ExplanationPanel
-          level={state.level}
-          register={state.register}
-          mobileOpen={mobileSheetOpen}
-          onToggleMobile={() => setMobileSheetOpen((v) => !v)}
-          onJumpLevel={setLevel}
-        />
       </div>
     </div>
   );
