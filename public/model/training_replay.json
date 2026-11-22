@@ -1,0 +1,1331 @@
+{
+  "version": 1,
+  "tracked_scalars_meta": [
+    {
+      "key": "wte.weight[100, 0]",
+      "param": "wte.weight",
+      "coord": [
+        100,
+        0
+      ],
+      "description": "Token embedding feature 0 for a common word token"
+    },
+    {
+      "key": "wpe.weight[0, 0]",
+      "param": "wpe.weight",
+      "coord": [
+        0,
+        0
+      ],
+      "description": "Position 0 embedding dimension 0"
+    },
+    {
+      "key": "blocks.0.attn.W_q.weight[0, 0]",
+      "param": "blocks.0.attn.W_q.weight",
+      "coord": [
+        0,
+        0
+      ],
+      "description": "Block 0 Query projection entry (0, 0)"
+    },
+    {
+      "key": "blocks.0.attn.W_k.weight[4, 12]",
+      "param": "blocks.0.attn.W_k.weight",
+      "coord": [
+        4,
+        12
+      ],
+      "description": "Block 0 Key projection entry (4, 12)"
+    },
+    {
+      "key": "blocks.0.attn.W_v.weight[16, 8]",
+      "param": "blocks.0.attn.W_v.weight",
+      "coord": [
+        16,
+        8
+      ],
+      "description": "Block 0 Value projection entry (16, 8)"
+    },
+    {
+      "key": "blocks.1.attn.W_q.weight[32, 7]",
+      "param": "blocks.1.attn.W_q.weight",
+      "coord": [
+        32,
+        7
+      ],
+      "description": "Block 1 Head 1 Query weight (32, 7)"
+    },
+    {
+      "key": "blocks.1.attn.W_o.weight[11, 45]",
+      "param": "blocks.1.attn.W_o.weight",
+      "coord": [
+        11,
+        45
+      ],
+      "description": "Block 1 Output projection weight (11, 45)"
+    },
+    {
+      "key": "blocks.2.attn.W_k.weight[64, 19]",
+      "param": "blocks.2.attn.W_k.weight",
+      "coord": [
+        64,
+        19
+      ],
+      "description": "Block 2 Head 2 Key weight (64, 19)"
+    },
+    {
+      "key": "blocks.2.mlp.W_up.weight[120, 3]",
+      "param": "blocks.2.mlp.W_up.weight",
+      "coord": [
+        120,
+        3
+      ],
+      "description": "Block 2 MLP expansion neuron 120, dim 3"
+    },
+    {
+      "key": "blocks.2.mlp.W_down.weight[3, 120]",
+      "param": "blocks.2.mlp.W_down.weight",
+      "coord": [
+        3,
+        120
+      ],
+      "description": "Block 2 MLP projection dim 3 from neuron 120"
+    },
+    {
+      "key": "blocks.3.attn.W_o.weight[96, 14]",
+      "param": "blocks.3.attn.W_o.weight",
+      "coord": [
+        96,
+        14
+      ],
+      "description": "Block 3 Output projection weight (96, 14)"
+    },
+    {
+      "key": "ln_f.weight[0]",
+      "param": "ln_f.weight",
+      "coord": [
+        0
+      ],
+      "description": "Final LayerNorm learned scale for dimension 0"
+    }
+  ],
+  "loss_curve": [
+    {
+      "step": 0,
+      "train_loss": 6.2624,
+      "val_loss": 6.2613
+    },
+    {
+      "step": 1,
+      "train_loss": 6.2629,
+      "val_loss": 6.1926
+    },
+    {
+      "step": 2,
+      "train_loss": 6.1986,
+      "val_loss": 6.1007
+    },
+    {
+      "step": 4,
+      "train_loss": 6.0342,
+      "val_loss": 5.9962
+    },
+    {
+      "step": 8,
+      "train_loss": 5.8246,
+      "val_loss": 5.7588
+    },
+    {
+      "step": 17,
+      "train_loss": 5.2976,
+      "val_loss": 5.2251
+    },
+    {
+      "step": 35,
+      "train_loss": 4.391,
+      "val_loss": 4.3086
+    },
+    {
+      "step": 50,
+      "train_loss": 4.0022,
+      "val_loss": 3.9684
+    },
+    {
+      "step": 72,
+      "train_loss": 3.8239,
+      "val_loss": 3.6984
+    },
+    {
+      "step": 100,
+      "train_loss": 3.6951,
+      "val_loss": 3.5472
+    },
+    {
+      "step": 147,
+      "train_loss": 3.4099,
+      "val_loss": 3.363
+    },
+    {
+      "step": 150,
+      "train_loss": 3.4022,
+      "val_loss": 3.3596
+    },
+    {
+      "step": 200,
+      "train_loss": 3.2254,
+      "val_loss": 3.1989
+    },
+    {
+      "step": 250,
+      "train_loss": 3.1264,
+      "val_loss": 3.0944
+    },
+    {
+      "step": 300,
+      "train_loss": 3.0757,
+      "val_loss": 3.0317
+    }
+  ],
+  "checkpoints": [
+    {
+      "step": 0,
+      "train_loss": 6.2624,
+      "val_loss": 6.2613,
+      "scalars": {
+        "wte.weight[100, 0]": 0.031752,
+        "wpe.weight[0, 0]": 0.004414,
+        "blocks.0.attn.W_q.weight[0, 0]": -0.005018,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.006832,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.019068,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.006454,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.007785,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.01296,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.037462,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.004262,
+        "blocks.3.attn.W_o.weight[96, 14]": 0.003855,
+        "ln_f.weight[0]": 1.0
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " He He He He He He He He He He He He He He He He He He He He",
+          "top5": [
+            {
+              "id": 152,
+              "token": " He",
+              "prob": 0.00608
+            },
+            {
+              "id": 474,
+              "token": " down",
+              "prob": 0.00343
+            },
+            {
+              "id": 348,
+              "token": " felt",
+              "prob": 0.0034
+            },
+            {
+              "id": 430,
+              "token": "if",
+              "prob": 0.00326
+            },
+            {
+              "id": 457,
+              "token": "eci",
+              "prob": 0.00321
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " she she she she she she she she she she she she she she she she she she she she",
+          "top5": [
+            {
+              "id": 173,
+              "token": " she",
+              "prob": 0.00602
+            },
+            {
+              "id": 377,
+              "token": " asked",
+              "prob": 0.00389
+            },
+            {
+              "id": 293,
+              "token": "!\"",
+              "prob": 0.00362
+            },
+            {
+              "id": 39,
+              "token": "D",
+              "prob": 0.00358
+            },
+            {
+              "id": 247,
+              "token": " do",
+              "prob": 0.00335
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " the the the the the the the the the the the the the the the the the the the the",
+          "top5": [
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00516
+            },
+            {
+              "id": 501,
+              "token": " cat",
+              "prob": 0.00359
+            },
+            {
+              "id": 314,
+              "token": " have",
+              "prob": 0.00342
+            },
+            {
+              "id": 44,
+              "token": "I",
+              "prob": 0.00324
+            },
+            {
+              "id": 28,
+              "token": "9",
+              "prob": 0.00324
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 1,
+      "train_loss": 6.2629,
+      "val_loss": 6.1926,
+      "scalars": {
+        "wte.weight[100, 0]": 0.031601,
+        "wpe.weight[0, 0]": 0.004564,
+        "blocks.0.attn.W_q.weight[0, 0]": -0.004868,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.006981,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.019218,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.006304,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.007935,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.01311,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.037612,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.004412,
+        "blocks.3.attn.W_o.weight[96, 14]": 0.003705,
+        "ln_f.weight[0]": 0.999842
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " He He He He He He He He He He He He He He He He He Hejj",
+          "top5": [
+            {
+              "id": 152,
+              "token": " He",
+              "prob": 0.00551
+            },
+            {
+              "id": 474,
+              "token": " down",
+              "prob": 0.00346
+            },
+            {
+              "id": 348,
+              "token": " felt",
+              "prob": 0.00336
+            },
+            {
+              "id": 371,
+              "token": "ade",
+              "prob": 0.00316
+            },
+            {
+              "id": 457,
+              "token": "eci",
+              "prob": 0.00312
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " she she she she she she she she she she she she she she she she she she she she",
+          "top5": [
+            {
+              "id": 173,
+              "token": " she",
+              "prob": 0.005
+            },
+            {
+              "id": 247,
+              "token": " do",
+              "prob": 0.00375
+            },
+            {
+              "id": 293,
+              "token": "!\"",
+              "prob": 0.00355
+            },
+            {
+              "id": 377,
+              "token": " asked",
+              "prob": 0.00348
+            },
+            {
+              "id": 39,
+              "token": "D",
+              "prob": 0.00337
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " the the the the the the the the the the the the the the the the the the the the",
+          "top5": [
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00562
+            },
+            {
+              "id": 501,
+              "token": " cat",
+              "prob": 0.00381
+            },
+            {
+              "id": 141,
+              "token": " sa",
+              "prob": 0.00347
+            },
+            {
+              "id": 314,
+              "token": " have",
+              "prob": 0.00346
+            },
+            {
+              "id": 44,
+              "token": "I",
+              "prob": 0.00337
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "train_loss": 6.1986,
+      "val_loss": 6.1007,
+      "scalars": {
+        "wte.weight[100, 0]": 0.031338,
+        "wpe.weight[0, 0]": 0.004808,
+        "blocks.0.attn.W_q.weight[0, 0]": -0.004649,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.006878,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.019512,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.006076,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.008231,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.013407,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.037429,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.004528,
+        "blocks.3.attn.W_o.weight[96, 14]": 0.003447,
+        "ln_f.weight[0]": 0.999566
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " Heldldldldldldldldldldldldldldldldldldld",
+          "top5": [
+            {
+              "id": 152,
+              "token": " He",
+              "prob": 0.00371
+            },
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.00371
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.0037
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.00357
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.00355
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": "....................",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.00502
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00398
+            },
+            {
+              "id": 247,
+              "token": " do",
+              "prob": 0.00392
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.00369
+            },
+            {
+              "id": 226,
+              "token": " very",
+              "prob": 0.00352
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": "....................",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.00504
+            },
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00484
+            },
+            {
+              "id": 496,
+              "token": " about",
+              "prob": 0.00396
+            },
+            {
+              "id": 141,
+              "token": " sa",
+              "prob": 0.00389
+            },
+            {
+              "id": 501,
+              "token": " cat",
+              "prob": 0.00372
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 4,
+      "train_loss": 6.0342,
+      "val_loss": 5.9962,
+      "scalars": {
+        "wte.weight[100, 0]": 0.031388,
+        "wpe.weight[0, 0]": 0.005479,
+        "blocks.0.attn.W_q.weight[0, 0]": -0.004672,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.006283,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.020361,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.005424,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.008917,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.014223,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.037403,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.005261,
+        "blocks.3.attn.W_o.weight[96, 14]": 0.002647,
+        "ln_f.weight[0]": 0.999177
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": "....................",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.00782
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.0046
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00445
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.00427
+            },
+            {
+              "id": 125,
+              "token": "\n\n",
+              "prob": 0.00414
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": "....................",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.0079
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00472
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.00443
+            },
+            {
+              "id": 155,
+              "token": " her",
+              "prob": 0.00418
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.00409
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": "....................",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.00775
+            },
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00499
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00422
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.0041
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.00407
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 8,
+      "train_loss": 5.8246,
+      "val_loss": 5.7588,
+      "scalars": {
+        "wte.weight[100, 0]": 0.033257,
+        "wpe.weight[0, 0]": 0.006341,
+        "blocks.0.attn.W_q.weight[0, 0]": -0.003245,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.003864,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.022174,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.003931,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.009523,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.016145,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.037001,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.005851,
+        "blocks.3.attn.W_o.weight[96, 14]": 0.001109,
+        "ln_f.weight[0]": 1.000444
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": "...\n\n.\n\n.\n\n.\n\n.\n\n\n\n\n\n.\n\n\n\n.\n\n.",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.0141
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.0071
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00666
+            },
+            {
+              "id": 81,
+              "token": "n",
+              "prob": 0.00626
+            },
+            {
+              "id": 106,
+              "token": " and",
+              "prob": 0.00592
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": "........\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.01289
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.00686
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00675
+            },
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00586
+            },
+            {
+              "id": 81,
+              "token": "n",
+              "prob": 0.00581
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": ".......\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n",
+          "top5": [
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.0123
+            },
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.00695
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.00673
+            },
+            {
+              "id": 15,
+              "token": ",",
+              "prob": 0.00623
+            },
+            {
+              "id": 81,
+              "token": "n",
+              "prob": 0.00604
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 17,
+      "train_loss": 5.2976,
+      "val_loss": 5.2251,
+      "scalars": {
+        "wte.weight[100, 0]": 0.036731,
+        "wpe.weight[0, 0]": 0.001194,
+        "blocks.0.attn.W_q.weight[0, 0]": 0.004598,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.000404,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.01833,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.005048,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.009398,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.019856,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.038747,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.003385,
+        "blocks.3.attn.W_o.weight[96, 14]": -0.002421,
+        "ln_f.weight[0]": 1.01272
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " was a a a a a a a a a a a a a a a a a a a",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.04712
+            },
+            {
+              "id": 100,
+              "token": " a",
+              "prob": 0.02598
+            },
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.02322
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.02217
+            },
+            {
+              "id": 106,
+              "token": " and",
+              "prob": 0.02044
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " was a a a a a a a a a a.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.04088
+            },
+            {
+              "id": 17,
+              "token": ".",
+              "prob": 0.03186
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.02825
+            },
+            {
+              "id": 100,
+              "token": " a",
+              "prob": 0.02681
+            },
+            {
+              "id": 106,
+              "token": " and",
+              "prob": 0.02204
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " a a a a a a a a a a a a a.\n\n\n\n\n\n\n\n\n\n\n\n",
+          "top5": [
+            {
+              "id": 100,
+              "token": " a",
+              "prob": 0.02218
+            },
+            {
+              "id": 104,
+              "token": " the",
+              "prob": 0.01541
+            },
+            {
+              "id": 109,
+              "token": " to",
+              "prob": 0.01421
+            },
+            {
+              "id": 68,
+              "token": "a",
+              "prob": 0.01314
+            },
+            {
+              "id": 86,
+              "token": "s",
+              "prob": 0.01247
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 35,
+      "train_loss": 4.391,
+      "val_loss": 4.3086,
+      "scalars": {
+        "wte.weight[100, 0]": 0.062242,
+        "wpe.weight[0, 0]": -0.005888,
+        "blocks.0.attn.W_q.weight[0, 0]": 0.012246,
+        "blocks.0.attn.W_k.weight[4, 12]": -0.00882,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.01987,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.010539,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.010313,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.022627,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.044411,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.006376,
+        "blocks.3.attn.W_o.weight[96, 14]": -0.003308,
+        "ln_f.weight[0]": 1.061607
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " was a time, \"Timed.\n\n\"\"\"\"\"\"\"\"\"\"",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.06622
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.0372
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.02697
+            },
+            {
+              "id": 274,
+              "token": " wanted",
+              "prob": 0.02052
+            },
+            {
+              "id": 177,
+              "token": " said",
+              "prob": 0.01883
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " was a time, \"Timed the pe.\n\n\"\"\"\"\"\"\"",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.11145
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.0433
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.02725
+            },
+            {
+              "id": 100,
+              "token": " a",
+              "prob": 0.0198
+            },
+            {
+              "id": 177,
+              "token": " said",
+              "prob": 0.01847
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " poy.\n\n\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"",
+          "top5": [
+            {
+              "id": 122,
+              "token": " p",
+              "prob": 0.05889
+            },
+            {
+              "id": 112,
+              "token": " f",
+              "prob": 0.0423
+            },
+            {
+              "id": 99,
+              "token": " t",
+              "prob": 0.03863
+            },
+            {
+              "id": 107,
+              "token": " b",
+              "prob": 0.03562
+            },
+            {
+              "id": 118,
+              "token": " c",
+              "prob": 0.029
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 72,
+      "train_loss": 3.8239,
+      "val_loss": 3.6984,
+      "scalars": {
+        "wte.weight[100, 0]": 0.082546,
+        "wpe.weight[0, 0]": -0.005685,
+        "blocks.0.attn.W_q.weight[0, 0]": 0.018843,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.004079,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.029491,
+        "blocks.1.attn.W_q.weight[32, 7]": 0.00046,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.008788,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.024801,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.052297,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.016739,
+        "blocks.3.attn.W_o.weight[96, 14]": -0.014835,
+        "ln_f.weight[0]": 1.151036
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " was a time there was a little girl named Lily. She was a big pe. She was",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.22486
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.04192
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.03136
+            },
+            {
+              "id": 274,
+              "token": " wanted",
+              "prob": 0.03051
+            },
+            {
+              "id": 366,
+              "token": " loved",
+              "prob": 0.02782
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " was a big.\n\nSo, \"I's.\n\nSo, \"I'",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.12326
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.09224
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.05468
+            },
+            {
+              "id": 304,
+              "token": " could",
+              "prob": 0.03631
+            },
+            {
+              "id": 347,
+              "token": " would",
+              "prob": 0.03055
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " pe. She was a big pe.\n\nThe little girl named Lily was a big p",
+          "top5": [
+            {
+              "id": 122,
+              "token": " p",
+              "prob": 0.0552
+            },
+            {
+              "id": 112,
+              "token": " f",
+              "prob": 0.05344
+            },
+            {
+              "id": 123,
+              "token": " m",
+              "prob": 0.04984
+            },
+            {
+              "id": 99,
+              "token": " t",
+              "prob": 0.04573
+            },
+            {
+              "id": 101,
+              "token": " s",
+              "prob": 0.04418
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 147,
+      "train_loss": 3.4099,
+      "val_loss": 3.363,
+      "scalars": {
+        "wte.weight[100, 0]": 0.116298,
+        "wpe.weight[0, 0]": -0.004431,
+        "blocks.0.attn.W_q.weight[0, 0]": 0.051328,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.006579,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.026858,
+        "blocks.1.attn.W_q.weight[32, 7]": -0.011298,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.010288,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.032366,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.066738,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.024111,
+        "blocks.3.attn.W_o.weight[96, 14]": -0.040087,
+        "ln_f.weight[0]": 1.259658
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " loved to play with a time, there was a little girl named Lily. One day, there was",
+          "top5": [
+            {
+              "id": 366,
+              "token": " loved",
+              "prob": 0.29515
+            },
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.1649
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.05078
+            },
+            {
+              "id": 274,
+              "token": " wanted",
+              "prob": 0.04955
+            },
+            {
+              "id": 447,
+              "token": " liked",
+              "prob": 0.04872
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " had a big tace. He was so excited to play with her mommy and said,",
+          "top5": [
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.10376
+            },
+            {
+              "id": 304,
+              "token": " could",
+              "prob": 0.06613
+            },
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.04987
+            },
+            {
+              "id": 177,
+              "token": " said",
+              "prob": 0.04385
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.04357
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " pe.\n\nThe little girl was so excited to the pe. He was so excited to",
+          "top5": [
+            {
+              "id": 122,
+              "token": " p",
+              "prob": 0.05089
+            },
+            {
+              "id": 99,
+              "token": " t",
+              "prob": 0.04225
+            },
+            {
+              "id": 107,
+              "token": " b",
+              "prob": 0.03967
+            },
+            {
+              "id": 123,
+              "token": " m",
+              "prob": 0.0332
+            },
+            {
+              "id": 112,
+              "token": " f",
+              "prob": 0.03225
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "step": 300,
+      "train_loss": 3.0757,
+      "val_loss": 3.0317,
+      "scalars": {
+        "wte.weight[100, 0]": 0.127609,
+        "wpe.weight[0, 0]": -0.003038,
+        "blocks.0.attn.W_q.weight[0, 0]": 0.06428,
+        "blocks.0.attn.W_k.weight[4, 12]": 0.019972,
+        "blocks.0.attn.W_v.weight[16, 8]": 0.025421,
+        "blocks.1.attn.W_q.weight[32, 7]": -0.004942,
+        "blocks.1.attn.W_o.weight[11, 45]": -0.006329,
+        "blocks.2.attn.W_k.weight[64, 19]": -0.037577,
+        "blocks.2.mlp.W_up.weight[120, 3]": 0.068607,
+        "blocks.2.mlp.W_down.weight[3, 120]": 0.018232,
+        "blocks.3.attn.W_o.weight[96, 14]": -0.038776,
+        "ln_f.weight[0]": 1.345487
+      },
+      "prompts": [
+        {
+          "prompt": "Once upon a time, a little dog named Max found a red ball. He",
+          "completion": " was a big, and he was very happy.\n\nOne day, the park, the park,",
+          "top5": [
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.26757
+            },
+            {
+              "id": 366,
+              "token": " loved",
+              "prob": 0.15599
+            },
+            {
+              "id": 274,
+              "token": " wanted",
+              "prob": 0.10045
+            },
+            {
+              "id": 447,
+              "token": " liked",
+              "prob": 0.07259
+            },
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.06033
+            }
+          ]
+        },
+        {
+          "prompt": "Lily wanted to bake a cake with her mom, so she",
+          "completion": " had a biggry. She was very happy and said, \"It't want to",
+          "top5": [
+            {
+              "id": 196,
+              "token": " had",
+              "prob": 0.10078
+            },
+            {
+              "id": 304,
+              "token": " could",
+              "prob": 0.08967
+            },
+            {
+              "id": 119,
+              "token": " was",
+              "prob": 0.08676
+            },
+            {
+              "id": 252,
+              "token": " saw",
+              "prob": 0.06135
+            },
+            {
+              "id": 274,
+              "token": " wanted",
+              "prob": 0.04506
+            }
+          ]
+        },
+        {
+          "prompt": "The cat sat on the mat and looked at the",
+          "completion": " peached.\n\nThe little girl was so happy and the little girl was so happy",
+          "top5": [
+            {
+              "id": 122,
+              "token": " p",
+              "prob": 0.04442
+            },
+            {
+              "id": 449,
+              "token": " park",
+              "prob": 0.04226
+            },
+            {
+              "id": 101,
+              "token": " s",
+              "prob": 0.03903
+            },
+            {
+              "id": 112,
+              "token": " f",
+              "prob": 0.03903
+            },
+            {
+              "id": 107,
+              "token": " b",
+              "prob": 0.0365
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
