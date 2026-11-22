@@ -1,0 +1,10 @@
+{
+  "name": "LLM Atlas — Miniature Transformer Explorer",
+  "short_name": "LLM Atlas",
+  "description": "A trace-backed, semantic-zoom explorable explanation of a real miniature transformer language model.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#f7f8fa",
+  "icons": []
+}
