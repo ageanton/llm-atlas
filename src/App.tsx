@@ -1,32 +1,46 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NumbersOverlay } from './components/NumbersOverlay';
 import {
-  LEVEL_CONTENT,
+  InspectorDrawers,
+  type TrainingReplayData,
+} from './components/InspectorDrawers';
+import {
+  CURRICULUM,
   PRESET_PROMPTS,
   registerLabel,
-} from './content/atlasContent';
+} from './content/curriculum';
 import { TransformerEngineClient } from './engine/client';
-import type { EngineInitResult, EngineTraceResult } from './engine/types';
-import { studioSound } from './scene/sound';
-import { TransformerWorld } from './scene/TransformerWorld';
+import type {
+  ActiveLayerTrace,
+  EngineInitResult,
+  EngineTraceResult,
+} from './engine/types';
+import { ArchitecturalWorld } from './scene/ArchitecturalWorld';
 import {
-  clampLevel,
   hasActiveAblation,
   isHeadDisabled,
+  STAGES,
   stateFromUrl,
   stateToSearch,
-  toggleHeadAblation,
   type AtlasState,
+  type DrawerId,
   type Register,
-  type ZoomLevel,
-} from './state/urlState';
+  type StageId,
+} from './state/atlasState';
+import {
+  computeSampledDistribution,
+  countActiveNeurons,
+  formatNum,
+  formatToken,
+  formatTokenExplicit,
+  sampleFromDistribution,
+  vectorL2Norm,
+} from './utils/math';
 
-const REGISTERS: Register[] = ['kid', 'curious', 'deep'];
-const LEVELS: ZoomLevel[] = [0, 1, 2, 3];
+const REGISTERS: Register[] = ['intuitive', 'technical', 'math'];
 
 export function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const worldRef = useRef<TransformerWorld | null>(null);
+  const worldRef = useRef<ArchitecturalWorld | null>(null);
   const clientRef = useRef<TransformerEngineClient | null>(null);
 
   const [state, setState] = useState<AtlasState>(() =>
@@ -34,16 +48,19 @@ export function App() {
   );
   const [draftPrompt, setDraftPrompt] = useState<string>(state.prompt);
   const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
+  const [replay, setReplay] = useState<TrainingReplayData | null>(null);
   const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
   const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
   const [hoveredTokenIdx, setHoveredTokenIdx] = useState<number | null>(null);
-  const [captionOpen, setCaptionOpen] = useState<boolean>(true);
-  const [muted, setMuted] = useState<boolean>(false);
+  const [temperature, setTemperature] = useState<number>(0.8);
+  const [topK, setTopK] = useState<number>(12);
+  const [topP, setTopP] = useState<number>(0.9);
+  const [explainOpen, setExplainOpen] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep shareable URL in sync
+  // Sync deep-linkable URL state
   useEffect(() => {
     const nextSearch = stateToSearch(state);
     if (window.location.search !== nextSearch) {
@@ -55,48 +72,33 @@ export function App() {
     }
   }, [state]);
 
-  // Mount Three.js sunlit studio once
+  // Mount Three.js Architectural World once
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
-
-    const world = new TransformerWorld(el, {
-      onSelectLevel: (level) => {
-        setState((prev) => ({ ...prev, level }));
-      },
-      onSelectChamber: (layer, zoomIn) => {
+    const world = new ArchitecturalWorld(el, {
+      onSelectStage: (stage, layer) => {
         setState((prev) => ({
           ...prev,
-          layer,
-          level: zoomIn ? 2 : prev.level,
+          stage,
+          layer: typeof layer === 'number' ? layer : prev.layer,
         }));
       },
       onSelectHead: (head) => {
-        setState((prev) => ({
-          ...prev,
-          head,
-          level: prev.level === 2 ? 3 : prev.level,
-        }));
-      },
-      onToggleHeadAblation: (layer, head) => {
-        setState((prev) => ({
-          ...prev,
-          ablation: toggleHeadAblation(prev.ablation, layer, head),
-        }));
+        setState((prev) => ({ ...prev, head }));
       },
       onHoverToken: (idx) => {
         setHoveredTokenIdx(idx);
       },
     });
     worldRef.current = world;
-
     return () => {
       world.dispose();
       worldRef.current = null;
     };
   }, []);
 
-  // Boot the verified Milestone 2 Web Worker and load real weights
+  // Boot verified TypeScript engine + load real weights & training replay
   useEffect(() => {
     const client = new TransformerEngineClient();
     clientRef.current = client;
@@ -112,13 +114,20 @@ export function App() {
         setError(err instanceof Error ? err.message : String(err))
       );
 
+    fetch(`${modelBaseUrl}training_replay.json`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: TrainingReplayData | null) => {
+        if (data) setReplay(data);
+      })
+      .catch(() => undefined);
+
     return () => {
       client.dispose();
       clientRef.current = null;
     };
   }, []);
 
-  // Recompute real forward pass & real ablation diff whenever prompt or ablation changes
+  // Recompute real forward pass & ablation counterfactual on change
   useEffect(() => {
     const client = clientRef.current;
     if (!client || !initInfo) return;
@@ -131,7 +140,6 @@ export function App() {
         const baseRes = await client.trace(state.prompt);
         if (!alive) return;
         setBaseline(baseRes);
-
         if (hasActiveAblation(state.ablation)) {
           const ablRes = await client.trace(state.prompt, state.ablation);
           if (!alive) return;
@@ -154,92 +162,154 @@ export function App() {
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  // Push real data snapshot into the 3D world
+  // Push live trace & parameters into the 3D scene
   useEffect(() => {
     if (!worldRef.current || !initInfo || !baseline) return;
     worldRef.current.update({
-      level: state.level,
+      stage: state.stage,
       layer: state.layer,
       head: state.head,
-      register: state.register,
+      showPreSoftmax: state.showPreSoftmax,
       ablation: state.ablation,
       baseline,
       ablated,
       tokenizer: initInfo.tokenizer,
       hoveredTokenIdx,
+      temperature,
+      topK,
+      topP,
     });
   }, [
     initInfo,
     baseline,
     ablated,
-    state.level,
+    state.stage,
     state.layer,
     state.head,
-    state.register,
+    state.showPreSoftmax,
     state.ablation,
     hoveredTokenIdx,
+    temperature,
+    topK,
+    topP,
   ]);
 
-  useEffect(() => {
-    worldRef.current?.setHoveredToken(hoveredTokenIdx);
-  }, [hoveredTokenIdx]);
-
-  // Keyboard shortcuts: Enter/+ zoom in, Esc/- zoom out, 1/2/3 lens
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key === 'Enter' || e.key === '=' || e.key === '+') {
-        setState((prev) => ({ ...prev, level: clampLevel(prev.level + 1) }));
-      } else if (e.key === 'Escape' || e.key === '-') {
-        setState((prev) => ({
-          ...prev,
-          showNumbers: false,
-          level: clampLevel(prev.level - 1),
-        }));
-      } else if (e.key === '1') {
-        setState((prev) => ({ ...prev, register: 'kid' }));
-      } else if (e.key === '2') {
-        setState((prev) => ({ ...prev, register: 'curious' }));
-      } else if (e.key === '3') {
-        setState((prev) => ({ ...prev, register: 'deep' }));
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+  const setStage = useCallback((stage: StageId) => {
+    setState((prev) => ({ ...prev, stage, drawer: 'none' }));
   }, []);
 
-  const setLevel = useCallback((level: ZoomLevel) => {
-    setState((prev) => ({ ...prev, level, showNumbers: false }));
+  const toggleDrawer = useCallback((drawer: DrawerId) => {
+    setState((prev) => ({
+      ...prev,
+      drawer: prev.drawer === drawer ? 'none' : drawer,
+    }));
   }, []);
 
-  const content = LEVEL_CONTENT[state.level];
-  const activeTrace = ablated ?? baseline;
-  const ablationOn = hasActiveAblation(state.ablation);
-
-  const breadcrumbs = useMemo(() => {
-    const items: { label: string; level: ZoomLevel }[] = [
-      { label: 'Machine', level: 0 },
-    ];
-    if (state.level >= 1) items.push({ label: 'Factory', level: 1 });
-    if (state.level >= 2)
-      items.push({ label: `Chamber ${state.layer}`, level: 2 });
-    if (state.level >= 3)
-      items.push({ label: `Head ${state.head}`, level: 3 });
-    return items;
-  }, [state.level, state.layer, state.head]);
-
-  const toggleSound = () => {
-    const next = !muted;
-    setMuted(next);
-    studioSound.setMuted(next);
+  // Autoregressive +1 token step directly from the real sampled distribution
+  const handleStepAutoregressive = () => {
+    const active = ablated ?? baseline;
+    if (!active || !initInfo) return;
+    const dist = computeSampledDistribution(
+      active.trace.finalLogits,
+      temperature,
+      topK,
+      topP
+    );
+    const nextId = sampleFromDistribution(dist);
+    const piece = initInfo.tokenizer.vocab[nextId] ?? '';
+    if (!piece || piece === '<|eos|>') return;
+    const nextPrompt = `${state.prompt}${piece}`;
+    setDraftPrompt(nextPrompt);
+    setState((prev) => ({ ...prev, prompt: nextPrompt }));
   };
+
+  const activeTrace = ablated ?? baseline;
+  const spec = CURRICULUM[state.stage];
+
+  // Live numeric telemetry lines specific to the current stage and real trace
+  const liveTelemetry = useMemo(() => {
+    if (!activeTrace || !initInfo) return [];
+    const { trace, tokens } = activeTrace;
+    const T = tokens.length;
+    const last = T - 1;
+    const topId = trace.greedyNextTokenId;
+    const topTok = formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '');
+    const topProb = (trace.finalProbs[topId] * 100).toFixed(1);
+
+    if (state.stage === 'overview') {
+      return [
+        `Sequence: ${T} / ${initInfo.manifest.config.max_seq_len} tokens · ${initInfo.manifest.total_params.toLocaleString()} params · computed in ${activeTrace.elapsedMs}ms`,
+        `Top prediction: "${topTok}" (${topProb}%)${trace.inputLoss !== null ? ` · Prompt loss: ${trace.inputLoss.toFixed(3)}` : ''}`,
+      ];
+    }
+    if (state.stage === 'embed') {
+      const embNorm = vectorL2Norm(trace.tokEmb[last]);
+      const posNorm = vectorL2Norm(trace.posEmb[last]);
+      return [
+        `Token #${last} ("${formatTokenExplicit(tokens[last].text)}", ID ${tokens[last].id})`,
+        `||wte|| = ${formatNum(embNorm, 3)} · ||wpe[${last}]|| = ${formatNum(posNorm, 3)} · output slab [${T} × 128]`,
+      ];
+    }
+    const lt = trace.layers[state.layer];
+    if (lt.skipped) {
+      return [`Block ${state.layer} is skipped by Ablation Lab (identity pass-through).`];
+    }
+    const active: ActiveLayerTrace = lt;
+    if (state.stage === 'block') {
+      return [
+        `Block ${state.layer} · ||h_in|| = ${formatNum(vectorL2Norm(active.residualBeforeAttn[last]), 2)} → +Attn (${formatNum(vectorL2Norm(active.attn.output[last]), 2)}) → +MLP (${formatNum(vectorL2Norm(active.mlp.output[last]), 2)})`,
+        `||h_out|| = ${formatNum(vectorL2Norm(active.residualAfterMlp[last]), 2)} · shape [${T} × 128]`,
+      ];
+    }
+    if (state.stage === 'attention') {
+      const focusIdx = hoveredTokenIdx ?? last;
+      const row = active.attn.attnWeights[state.head][focusIdx];
+      let bestCol = 0;
+      for (let c = 1; c <= focusIdx; c++) {
+        if (row[c] > row[bestCol]) bestCol = c;
+      }
+      const sum = row.reduce((a, b) => a + b, 0);
+      const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
+      return [
+        `Block ${state.layer} Head ${state.head}${headOff ? ' (DISABLED)' : ''} · Query "${formatTokenExplicit(tokens[focusIdx].text)}" attends most to "${formatTokenExplicit(tokens[bestCol].text)}" (${(row[bestCol] * 100).toFixed(1)}%)`,
+        `Row softmax sum = ${sum.toFixed(6)} · Q, K, V shape [${T} × 32]`,
+      ];
+    }
+    if (state.stage === 'mlp') {
+      const activeNeurons = countActiveNeurons(active.mlp.hidden[last], 0.05);
+      return [
+        `Block ${state.layer} MLP · Token "${formatTokenExplicit(tokens[last].text)}": ${activeNeurons} / 512 GELU neurons active (> 0.05)`,
+        `Expansion: 128 → 512 → 128 · ||Δmlp|| = ${formatNum(vectorL2Norm(active.mlp.output[last]), 2)}`,
+      ];
+    }
+    const pool = computeSampledDistribution(
+      trace.finalLogits,
+      temperature,
+      topK,
+      topP
+    );
+    return [
+      `Top logit: "${topTok}" z = ${formatNum(trace.finalLogits[topId], 2)} → raw P = ${topProb}%`,
+      `Active sampling pool: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)})`,
+    ];
+  }, [
+    activeTrace,
+    initInfo,
+    state.stage,
+    state.layer,
+    state.head,
+    state.ablation,
+    hoveredTokenIdx,
+    temperature,
+    topK,
+    topP,
+  ]);
 
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
+      setTimeout(() => setCopied(false), 1600);
     } catch {
       setCopied(false);
     }
@@ -250,51 +320,34 @@ export function App() {
       <div
         ref={mountRef}
         className="canvas-mount"
-        aria-label="Interactive 3D miniature transformer studio"
+        aria-label="Interactive 3D architectural miniature transformer"
       />
 
       {!initInfo && !error && (
         <div className="loading-pill glass-panel">
-          Waking up the miniature transformer (862,464 real parameters)...
+          Loading 862,464 real trained parameters...
         </div>
       )}
-
       {error && <div className="error-toast">{error}</div>}
 
-      {/* Top Floating Chrome */}
+      {/* Top Architectural Navigation + Labs */}
       <header className="hud-top">
-        <nav className="hud-pill-row glass-panel" aria-label="Breadcrumb">
-          <span className="brand-title">LLM Atlas</span>
-          {breadcrumbs.map((crumb, idx) => (
-            <span key={crumb.level} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              {idx > 0 && <span className="crumb-sep">›</span>}
-              <button
-                type="button"
-                className={`crumb-btn ${crumb.level === state.level ? 'is-current' : ''}`}
-                onClick={() => setLevel(crumb.level)}
-              >
-                {crumb.label}
-              </button>
-            </span>
+        <nav className="hud-bar glass-panel" aria-label="Transformer stages">
+          <span className="brand-mark">LLM Atlas</span>
+          {STAGES.map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={`stage-btn ${state.stage === id ? 'is-current' : ''}`}
+              onClick={() => setStage(id)}
+            >
+              {CURRICULUM[id].navLabel}
+            </button>
           ))}
-          <button
-            type="button"
-            className={`honesty-dot ${
-              content.honesty.kind === 'literal' ? 'is-literal' : 'is-abstraction'
-            }`}
-            title={content.honesty.detail}
-            onClick={() => {
-              if (content.honesty.literalLevel !== undefined) {
-                setLevel(content.honesty.literalLevel);
-              }
-            }}
-          >
-            {content.honesty.label}
-          </button>
         </nav>
 
-        <div className="hud-pill-row glass-panel">
-          <div className="lens-group" role="group" aria-label="Explanation depth">
+        <div className="hud-bar glass-panel">
+          <div className="lens-group" role="group" aria-label="Explanation register">
             {REGISTERS.map((r) => (
               <button
                 key={r}
@@ -306,8 +359,32 @@ export function App() {
               </button>
             ))}
           </div>
-          <button type="button" className="pill-btn" onClick={toggleSound}>
-            {muted ? 'Sound off' : 'Sound on'}
+          <button
+            type="button"
+            className={`pill-btn ${
+              state.drawer === 'ablate'
+                ? 'is-active'
+                : hasActiveAblation(state.ablation)
+                  ? 'is-warm'
+                  : ''
+            }`}
+            onClick={() => toggleDrawer('ablate')}
+          >
+            {hasActiveAblation(state.ablation) ? 'Ablation (on)' : 'Ablate'}
+          </button>
+          <button
+            type="button"
+            className={`pill-btn ${state.drawer === 'weights' ? 'is-active' : ''}`}
+            onClick={() => toggleDrawer('weights')}
+          >
+            Weights
+          </button>
+          <button
+            type="button"
+            className={`pill-btn ${state.drawer === 'training' ? 'is-active' : ''}`}
+            onClick={() => toggleDrawer('training')}
+          >
+            Training & Scale
           </button>
           <button type="button" className="pill-btn" onClick={() => void copyLink()}>
             {copied ? 'Copied' : 'Share'}
@@ -315,34 +392,49 @@ export function App() {
         </div>
       </header>
 
-      {/* Quiet Floating Explanation Card */}
-      <aside className="caption-card glass-panel" aria-live="polite">
-        <div className="caption-top">
-          <h1 className="caption-title">{content.title}</h1>
-          <button
-            type="button"
-            className="pill-btn"
-            onClick={() => setCaptionOpen((v) => !v)}
-          >
-            {captionOpen ? 'Hide' : 'Read'}
-          </button>
+      {/* Bottom-Left Floating Curriculum + Live Numeric Telemetry */}
+      <aside className="explain-card glass-panel" aria-live="polite">
+        <div className="explain-head">
+          <h1 className="explain-title">{spec.title}</h1>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span
+              className={`honesty-tag ${
+                spec.honestyKind === 'literal' ? 'is-literal' : 'is-structural'
+              }`}
+            >
+              {spec.honestyLabel}
+            </span>
+            <button
+              type="button"
+              className="pill-btn"
+              onClick={() => setExplainOpen((v) => !v)}
+            >
+              {explainOpen ? 'Hide' : 'Read'}
+            </button>
+          </div>
         </div>
 
-        {captionOpen && (
+        {explainOpen && (
           <>
-            <p className="caption-body">{content.copy[state.register]}</p>
-            {state.register === 'kid' && content.simplificationNote && (
-              <p className="caption-note">{content.simplificationNote}</p>
+            <p className="explain-prose">{spec.copy[state.register]}</p>
+
+            {liveTelemetry.length > 0 && (
+              <div className="telemetry-box mono">
+                {liveTelemetry.map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
             )}
-            {content.createsQuestion && content.nextCta && state.level < 3 && (
-              <div className="caption-next">
-                <span className="caption-question">{content.createsQuestion}</span>
+
+            {spec.nextStage && spec.nextQuestion && (
+              <div className="explain-next">
+                <span className="next-q">{spec.nextQuestion}</span>
                 <button
                   type="button"
                   className="cta-btn"
-                  onClick={() => setLevel(clampLevel(state.level + 1))}
+                  onClick={() => setStage(spec.nextStage!)}
                 >
-                  {content.nextCta}
+                  {CURRICULUM[spec.nextStage].navLabel} →
                 </button>
               </div>
             )}
@@ -350,11 +442,13 @@ export function App() {
         )}
       </aside>
 
-      {/* Contextual Tactile Controls for Chambers & Head Orbs */}
-      <div className="play-dock">
-        {state.level >= 2 && (
-          <div className="play-strip glass-panel">
-            <span className="strip-label">Chamber</span>
+      {/* Bottom-Right Contextual Architectural Controls */}
+      <div className="stage-dock">
+        {(state.stage === 'block' ||
+          state.stage === 'attention' ||
+          state.stage === 'mlp') && (
+          <div className="dock-strip glass-panel">
+            <span className="dock-label">Block</span>
             {[0, 1, 2, 3].map((l) => (
               <button
                 key={l}
@@ -368,9 +462,9 @@ export function App() {
           </div>
         )}
 
-        {state.level >= 2 && (
-          <div className="play-strip glass-panel">
-            <span className="strip-label">Orbs</span>
+        {state.stage === 'attention' && (
+          <div className="dock-strip glass-panel">
+            <span className="dock-label">Head</span>
             {[0, 1, 2, 3].map((h) => {
               const off = isHeadDisabled(state.ablation, state.layer, h);
               return (
@@ -380,141 +474,187 @@ export function App() {
                   className={`pill-btn mono ${
                     off ? 'is-warm' : state.head === h ? 'is-active' : ''
                   }`}
-                  onClick={() => {
-                    studioSound.playTileTap(h);
-                    setState((prev) => ({ ...prev, head: h }));
-                  }}
+                  onClick={() => setState((prev) => ({ ...prev, head: h }))}
                 >
-                  H{h} {off ? '(off)' : ''}
+                  H{h}
                 </button>
               );
             })}
             <button
               type="button"
-              className={`pill-btn ${
-                isHeadDisabled(state.ablation, state.layer, state.head)
-                  ? 'is-warm'
-                  : ''
-              }`}
-              onClick={() => {
-                const currentlyOff = isHeadDisabled(
-                  state.ablation,
-                  state.layer,
-                  state.head
-                );
-                studioSound.playPop(!currentlyOff);
+              className={`pill-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
+              onClick={() =>
                 setState((prev) => ({
                   ...prev,
-                  ablation: toggleHeadAblation(
-                    prev.ablation,
-                    prev.layer,
-                    prev.head
-                  ),
-                }));
-              }}
+                  showPreSoftmax: !prev.showPreSoftmax,
+                }))
+              }
             >
-              {isHeadDisabled(state.ablation, state.layer, state.head)
-                ? `Plug H${state.head} back in`
-                : `Pop out H${state.head}`}
+              {state.showPreSoftmax ? 'Raw QKᵀ/√32' : 'Softmax A'}
+            </button>
+            <button
+              type="button"
+              className={`pill-btn ${state.drawer === 'matrix' ? 'is-active' : ''}`}
+              onClick={() => toggleDrawer('matrix')}
+            >
+              Exact Table
             </button>
           </div>
         )}
 
-        {state.level === 3 && (
-          <div className="play-strip glass-panel">
+        {state.stage === 'output' && (
+          <div className="dock-strip sampling-dock glass-panel">
+            <div className="mini-slider">
+              <div className="row-between">
+                <span>Temperature</span>
+                <span className="mono">{temperature.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min={0.1}
+                max={2.0}
+                step={0.05}
+                value={temperature}
+                onChange={(e) => setTemperature(Number(e.target.value))}
+              />
+            </div>
+            <div className="mini-slider">
+              <div className="row-between">
+                <span>Top-k</span>
+                <span className="mono">{topK}</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={40}
+                step={1}
+                value={topK}
+                onChange={(e) => setTopK(Number(e.target.value))}
+              />
+            </div>
+            <div className="mini-slider">
+              <div className="row-between">
+                <span>Top-p (Nucleus)</span>
+                <span className="mono">{topP.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min={0.1}
+                max={1.0}
+                step={0.05}
+                value={topP}
+                onChange={(e) => setTopP(Number(e.target.value))}
+              />
+            </div>
             <button
               type="button"
-              className={`pill-btn ${state.showNumbers ? 'is-active' : ''}`}
-              onClick={() =>
-                setState((prev) => ({ ...prev, showNumbers: !prev.showNumbers }))
-              }
+              className="cta-btn"
+              disabled={busy || !activeTrace}
+              onClick={handleStepAutoregressive}
             >
-              {state.showNumbers ? 'Fold to ribbons' : 'Unfold numbers'}
+              Step +1 Token (Autoregressive)
             </button>
-            {ablationOn && (
-              <button
-                type="button"
-                className="pill-btn is-warm"
-                onClick={() => {
-                  studioSound.playPop(false);
-                  setState((prev) => ({ ...prev, ablation: {} }));
-                }}
-              >
-                Restore all orbs
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {/* Exact Attention Matrix Overlay (only when user clicks "Unfold numbers") */}
-      {state.level === 3 && state.showNumbers && activeTrace && (
-        <NumbersOverlay
-          tokens={activeTrace.tokens}
-          trace={activeTrace.trace}
+      {/* Educational Labs Drawer */}
+      {initInfo && baseline && clientRef.current && (
+        <InspectorDrawers
+          drawer={state.drawer}
+          client={clientRef.current}
+          manifest={initInfo.manifest}
+          tokenizer={initInfo.tokenizer}
+          baseline={baseline}
+          ablated={ablated}
+          ablation={state.ablation}
           layer={state.layer}
           head={state.head}
+          showPreSoftmax={state.showPreSoftmax}
           hoveredTokenIdx={hoveredTokenIdx}
+          replay={replay}
+          paramName={state.paramName}
+          paramRow={state.paramRow}
+          paramCol={state.paramCol}
+          onChangeAblation={(ablation) =>
+            setState((prev) => ({ ...prev, ablation }))
+          }
+          onSelectParam={(paramName, paramRow, paramCol) =>
+            setState((prev) => ({
+              ...prev,
+              drawer: 'weights',
+              paramName,
+              paramRow,
+              paramCol,
+            }))
+          }
+          onTogglePreSoftmax={() =>
+            setState((prev) => ({
+              ...prev,
+              showPreSoftmax: !prev.showPreSoftmax,
+            }))
+          }
           onHoverToken={setHoveredTokenIdx}
-          onClose={() => setState((prev) => ({ ...prev, showNumbers: false }))}
+          onClose={() => setState((prev) => ({ ...prev, drawer: 'none' }))}
         />
       )}
 
-      {/* Bottom Floating Sentence Pill */}
+      {/* Bottom Sentence Input & Interactive BPE Token Strip */}
       <div className="hud-bottom">
-        <div className="preset-row">
-          {PRESET_PROMPTS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className={`pill-btn ${state.prompt === p.text ? 'is-active' : ''}`}
-              onClick={() => {
-                studioSound.playTileTap(1);
-                setDraftPrompt(p.text);
-                setState((prev) => ({ ...prev, prompt: p.text }));
-                worldRef.current?.triggerPulse();
-              }}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        {activeTrace && (
+          <div className="token-ribbon" aria-label="BPE Tokens">
+            {activeTrace.tokens.map((tok, idx) => (
+              <button
+                key={`${tok.start}-${idx}`}
+                type="button"
+                className={`tok-chip mono ${
+                  hoveredTokenIdx === idx ? 'is-hover' : ''
+                }`}
+                onMouseEnter={() => setHoveredTokenIdx(idx)}
+                onMouseLeave={() => setHoveredTokenIdx(null)}
+                title={`Slot ${idx} · Token ID #${tok.id} · chars [${tok.start}, ${tok.end})`}
+              >
+                {formatToken(tok.text)}
+              </button>
+            ))}
+          </div>
+        )}
 
         <form
           className="sentence-bar glass-panel"
           onSubmit={(e) => {
             e.preventDefault();
             if (!draftPrompt.trim()) return;
-            studioSound.playTileTap(2);
             setState((prev) => ({ ...prev, prompt: draftPrompt }));
-            worldRef.current?.triggerPulse();
           }}
         >
           <input
             className="sentence-input"
             value={draftPrompt}
             onChange={(e) => setDraftPrompt(e.target.value)}
-            placeholder="Type a short story sentence..."
-            aria-label="Story sentence fed to the miniature transformer"
+            placeholder="Type any sentence to run a live forward pass..."
+            aria-label="Prompt sentence"
           />
-          <div className="depth-dots" role="group" aria-label="Zoom depth">
-            {LEVELS.map((lv) => (
-              <button
-                key={lv}
-                type="button"
-                className={`depth-dot ${state.level === lv ? 'is-current' : ''}`}
-                title={LEVEL_CONTENT[lv].crumb}
-                aria-label={`Zoom to ${LEVEL_CONTENT[lv].crumb}`}
-                onClick={() => setLevel(lv)}
-              />
-            ))}
-          </div>
-          <button
-            type="submit"
-            className="cta-btn"
-            disabled={busy || !initInfo}
+          <select
+            className="select-pill"
+            value=""
+            aria-label="Choose an example prompt"
+            onChange={(e) => {
+              const p = PRESET_PROMPTS.find((x) => x.id === e.target.value);
+              if (!p) return;
+              setDraftPrompt(p.text);
+              setState((prev) => ({ ...prev, prompt: p.text }));
+            }}
           >
-            {busy ? 'Thinking...' : 'Play'}
+            <option value="">Examples...</option>
+            {PRESET_PROMPTS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="cta-btn" disabled={busy || !initInfo}>
+            {busy ? 'Tracing...' : 'Run'}
           </button>
         </form>
       </div>
