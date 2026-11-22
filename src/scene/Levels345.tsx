@@ -1,196 +1,220 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { TransformerEngineClient } from '../engine/client';
-import type { ModelManifest, TrainingReplayData, TransformerTrace } from '../engine/types';
-import type { Register, SelectionTarget } from '../state/urlState';
-import { buildParamSelection } from '../state/urlState';
-import { divergingColor, formatNum, formatToken, sequentialColor } from '../utils/color';
+import type {
+  ActiveLayerTrace,
+  EncodedToken,
+  ModelManifest,
+  Trace,
+} from '../engine/types';
+import type { TrainingReplayData } from '../panels/TeachingModes';
+import {
+  buildParamSelection,
+  type Register,
+  type SelectionTarget,
+} from '../state/urlState';
+import {
+  divergingColor,
+  formatNum,
+  formatToken,
+  sequentialColor,
+} from '../utils/color';
 import { CanvasHeatmap } from './CanvasHeatmap';
 
-export interface Level345Props {
-  tokens: string[];
-  trace: TransformerTrace;
+interface Level3Props {
+  tokens: EncodedToken[];
+  trace: Trace;
+  register: Register;
   target: SelectionTarget;
-  register?: Register;
-  onSelect: (sel: string, zoomLevel5?: boolean) => void;
-  hoveredTokenIdx?: number | null;
-  onHoverToken?: (idx: number | null) => void;
-  manifest?: ModelManifest;
-  client?: TransformerEngineClient;
-  replay?: TrainingReplayData | null;
-  onOpenReplay?: () => void;
+  hoveredTokenIdx: number | null;
+  onHoverToken: (idx: number | null) => void;
+  onSelect: (sel: string, zoomIn?: boolean) => void;
 }
 
 export function Level3View({
   tokens,
   trace,
+  register,
   target,
-  onSelect,
   hoveredTokenIdx,
   onHoverToken,
-}: Level345Props) {
-  const layer = target.layer;
-  const head = target.head;
-  const T = tokens.length;
+  onSelect,
+}: Level3Props) {
+  const [showPreSoftmax, setShowPreSoftmax] = useState(false);
+  const [hoveredCell, setHoveredCell] = useState<{
+    q: number;
+    k: number;
+  } | null>(null);
 
-  const rawHeadAttn = trace.blocks[layer].attn_weights[head];
-  const headAttn = useMemo(() => {
-    return rawHeadAttn.slice(0, T).map((row) => row.slice(0, T));
-  }, [rawHeadAttn, T]);
+  const layerIdx = target.layer;
+  const headIdx = target.head;
+  const layerTrace = trace.layers[layerIdx];
 
-  const activeFocusRow = hoveredTokenIdx !== null && hoveredTokenIdx !== undefined && hoveredTokenIdx < T
+  if (layerTrace.skipped) {
+    return (
+      <div className="scene-stage">
+        <div className="empty-notice">
+          Block {layerIdx} is disabled in Ablation Mode. Switch to another block or re-enable Block {layerIdx} to inspect its attention weights.
+        </div>
+      </div>
+    );
+  }
+
+  const activeLayer = layerTrace as ActiveLayerTrace;
+  const seqLen = tokens.length;
+  const weights = activeLayer.attn.attnWeights[headIdx] ?? [];
+  const rawScores = activeLayer.attn.rawScores[headIdx] ?? [];
+
+  const focusRow = hoveredTokenIdx !== null && hoveredTokenIdx < seqLen
     ? hoveredTokenIdx
-    : T - 1;
+    : seqLen - 1;
 
-  const focusScores = headAttn[activeFocusRow] || [];
+  const rowWeights = weights[focusRow] ?? [];
 
   return (
-    <div className="scene-view level-3-view">
+    <div className="scene-stage level3-stage">
       <div className="l3-header">
         <div>
-          <h2 className="l3-title mono">
-            Block {layer} · Head {head} Self-Attention Matrix
+          <h2>
+            Block {layerIdx} · Head {headIdx} Attention Weights
           </h2>
-          <span className="badge-chip mono">A = softmax(Q·K^T / √32 + CausalMask)</span>
+          <span className="mono l3-meta">
+            A = softmax(Q·Kᵀ / √32 + CausalMask) · causal lower-triangular matrix
+          </span>
         </div>
 
-        <div className="head-switcher-row mono">
-          {[0, 1, 2, 3].map((h) => (
-            <button
-              key={h}
-              type="button"
-              className={`seg-btn ${h === head ? 'is-active' : ''}`}
-              onClick={() => onSelect(`block${layer}.attn.head${h}.K`)}
-            >
-              Head {h}
-            </button>
-          ))}
+        <div className="l3-actions">
+          <button
+            type="button"
+            className={`seg-btn mono ${showPreSoftmax ? 'is-active' : ''}`}
+            onClick={() => setShowPreSoftmax((v) => !v)}
+          >
+            {showPreSoftmax ? 'Showing Raw Q·Kᵀ scores' : 'Showing Softmax probabilities [0..1]'}
+          </button>
         </div>
       </div>
 
-      <div className="l3-workspace-grid">
-        <div className="l3-matrix-container">
-          <div className="matrix-top-tokens">
-            <span className="matrix-corner-label mono">Key →</span>
+      <div className="l3-matrix-layout">
+        <div className="l3-matrix-card">
+          <div className="matrix-col-headers" style={{ marginLeft: 96 }}>
             {tokens.map((tok, c) => (
               <span
-                key={c}
-                className={`matrix-col-tok mono ${hoveredTokenIdx === c ? 'is-hovered' : ''}`}
-                onMouseEnter={() => onHoverToken?.(c)}
-                onMouseLeave={() => onHoverToken?.(null)}
+                key={`${tok.start}-${c}`}
+                className={`matrix-tok-col mono ${hoveredTokenIdx === c ? 'is-active' : ''}`}
+                onMouseEnter={() => onHoverToken(c)}
+                onMouseLeave={() => onHoverToken(null)}
               >
-                {formatToken(tok)}
+                {formatToken(tok.text)}
               </span>
             ))}
           </div>
 
-          <div className="matrix-body-wrap">
-            <div className="matrix-left-tokens">
+          <div className="matrix-rows-wrap">
+            <div className="matrix-row-headers">
               {tokens.map((tok, r) => (
-                <div
-                  key={r}
-                  className={`matrix-row-tok mono ${r === activeFocusRow ? 'is-active' : ''}`}
-                  onMouseEnter={() => onHoverToken?.(r)}
-                  onMouseLeave={() => onHoverToken?.(null)}
+                <span
+                  key={`${tok.start}-${r}`}
+                  className={`matrix-tok-row mono ${focusRow === r ? 'is-active' : ''}`}
+                  onMouseEnter={() => onHoverToken(r)}
+                  onMouseLeave={() => onHoverToken(null)}
                 >
-                  <span className="r-idx">{r}:</span>
-                  {formatToken(tok)}
-                </div>
+                  <span className="r-idx">{r}:</span> {formatToken(tok.text)}
+                </span>
               ))}
             </div>
 
-            <div className="matrix-cells-grid">
-              {headAttn.map((row, r) => (
-                <div key={r} className="attn-matrix-row">
-                  {row.map((val, c) => {
+            <div className="matrix-cells-body">
+              {tokens.map((_, r) => (
+                <div key={r} className="heatmap-row">
+                  {tokens.map((_, c) => {
                     const isMasked = c > r;
-                    const bg = isMasked ? '#f1f5f9' : sequentialColor(val);
-                    const isFocus = r === activeFocusRow;
+                    const val = showPreSoftmax
+                      ? rawScores[r]?.[c] ?? 0
+                      : weights[r]?.[c] ?? 0;
+                    const bg = isMasked
+                      ? '#f1f5f9'
+                      : showPreSoftmax
+                        ? divergingColor(val / 3.0)
+                        : sequentialColor(val);
+
                     return (
-                      <div
+                      <button
                         key={c}
-                        className={`attn-matrix-cell mono ${isMasked ? 'is-masked' : ''} ${isFocus ? 'is-focus-row' : ''}`}
+                        type="button"
+                        className={`heatmap-cell ${isMasked ? 'is-masked' : ''} ${focusRow === r ? 'is-focus-row' : ''}`}
                         style={{ backgroundColor: bg }}
-                        title={`Row ${r} ("${tokens[r]}") attending to Col ${c} ("${tokens[c]}") = ${formatNum(val, 3)}`}
+                        onMouseEnter={() => setHoveredCell({ q: r, k: c })}
+                        onMouseLeave={() => setHoveredCell(null)}
                         onClick={() => {
                           onSelect(
                             buildParamSelection(
-                              `blocks.${layer}.attn.c_attn.weight`,
+                              `blocks.${layerIdx}.attn.c_attn.weight`,
                               r,
                               c
                             ),
                             true
                           );
                         }}
+                        aria-label={`Attention from token ${r} to token ${c}: ${val.toFixed(3)}`}
                       >
-                        {!isMasked && T <= 16 && (
-                          <span className="cell-num">{formatNum(val, 2)}</span>
+                        {!isMasked && seqLen <= 14 && (
+                          <span className="cell-text mono">{val.toFixed(2)}</span>
                         )}
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
               ))}
             </div>
           </div>
+
+          <div className="matrix-caption mono">
+            {hoveredCell ? (
+              <span>
+                Row {hoveredCell.q} (“{tokens[hoveredCell.q]?.text}”) attending to Col {hoveredCell.k} (“{tokens[hoveredCell.k]?.text}”) ={' '}
+                {weights[hoveredCell.q]?.[hoveredCell.k]?.toFixed(4)}
+              </span>
+            ) : (
+              <span>Hover any cell to read precise attention weight. Click to inspect underlying weight coordinate.</span>
+            )}
+          </div>
         </div>
 
-        <div className="l3-readout-card">
-          <h3 className="mono">
-            Token Focus: “{formatToken(tokens[activeFocusRow] ?? '')}” (#{activeFocusRow})
-          </h3>
-          <p className="card-subtext">
-            Attention distribution over earlier words for this token:
-          </p>
-          <div className="focus-distribution-list">
-            {focusScores.map((score, c) => {
-              if (c > activeFocusRow) return null;
-              const pct = Math.round(score * 100);
+        <div className="l3-focus-card">
+          <div className="focus-header">
+            <h3>Attention Distribution for “{tokens[focusRow]?.text}”</h3>
+            <span className="mono focus-sub">Row {focusRow} distribution</span>
+          </div>
+
+          <div className="focus-bars">
+            {tokens.slice(0, focusRow + 1).map((tok, c) => {
+              const weight = rowWeights[c] ?? 0;
+              const pct = (weight * 100).toFixed(1);
               return (
                 <div key={c} className="focus-bar-row">
-                  <div className="focus-bar-tok mono">
-                    <span className="c-idx">c{c}:</span>
-                    <span>“{formatToken(tokens[c])}”</span>
-                  </div>
-                  <div className="focus-bar-track">
+                  <span className="bar-tok mono">
+                    {c}: “{formatToken(tok.text)}”
+                  </span>
+                  <div className="bar-track">
                     <div
-                      className="focus-bar-fill"
+                      className="bar-fill"
                       style={{
                         width: `${pct}%`,
-                        backgroundColor: sequentialColor(score),
+                        backgroundColor: sequentialColor(weight),
                       }}
                     />
                   </div>
-                  <span className="focus-bar-pct mono">{pct}%</span>
+                  <span className="bar-pct mono">{pct}%</span>
                 </div>
               );
             })}
           </div>
 
-          <div className="l3-qk-routing-box">
-            <span className="mono badge-chip">Vector Projections</span>
-            <p className="card-subtext">
-              Inspect how Key and Query weights transform tokens into relevance scores:
-            </p>
-            <div className="btn-group-column">
-              <button
-                type="button"
-                className="seg-btn"
-                onClick={() =>
-                  onSelect(`param:blocks.${layer}.attn.c_attn.weight@0,0`, true)
-                }
-              >
-                Inspect Q/K/V Projection Matrix →
-              </button>
-              <button
-                type="button"
-                className="seg-btn"
-                onClick={() =>
-                  onSelect(`param:blocks.${layer}.attn.c_proj.weight@0,0`, true)
-                }
-              >
-                Inspect Attention Output Projection →
-              </button>
-            </div>
+          <div className="focus-math-box mono">
+            <code>
+              {register === 'complete'
+                ? `A[${focusRow}, j] = exp(q_${focusRow} · k_j / √32) / Σ exp(q_${focusRow} · k_m / √32)`
+                : `Higher attention weights copy more value vector from earlier tokens into "${tokens[focusRow]?.text}".`}
+            </code>
           </div>
         </div>
       </div>
@@ -198,247 +222,217 @@ export function Level3View({
   );
 }
 
+interface Level4Props {
+  tokens: EncodedToken[];
+  trace: Trace;
+  manifest: ModelManifest;
+  client: TransformerEngineClient;
+  target: SelectionTarget;
+  onSelect: (sel: string, zoomIn?: boolean) => void;
+}
+
 export function Level4View({
+  tokens,
+  trace,
   manifest,
   client,
   target,
   onSelect,
-  tokens,
-  trace,
-}: Level345Props) {
-  const [sourceKind, setSourceKind] = useState<'weight' | 'activation'>('weight');
+}: Level4Props) {
+  const [source, setSource] = useState<'weight' | 'activation'>('weight');
   const [tensorData, setTensorData] = useState<Float32Array | null>(null);
-  const [showGrid, setShowGrid] = useState(false);
+  const [showTable, setShowTable] = useState(false);
 
-  const paramMeta = useMemo(() => {
-    if (!manifest) return null;
-    return (
-      manifest.tensors.find((t) => t.name === target.matrix) ||
-      manifest.tensors[0]
-    );
-  }, [manifest, target.matrix]);
+  const meta = useMemo(
+    () => manifest.tensors.find((t) => t.name === target.matrix) ?? manifest.tensors[0],
+    [manifest, target.matrix]
+  );
 
   useEffect(() => {
-    if (!client || !paramMeta || sourceKind !== 'weight') return;
-    client.getTensor(paramMeta.name).then((buf) => {
-      setTensorData(buf);
+    if (source !== 'weight') return;
+    let alive = true;
+    void client.getTensor(meta.name).then((buf) => {
+      if (alive) setTensorData(buf);
     });
-  }, [client, paramMeta, sourceKind]);
+    return () => {
+      alive = false;
+    };
+  }, [client, meta.name, source]);
 
-  if (!paramMeta || !manifest) {
-    return <div className="scene-view level-4-view">Loading tensor metadata...</div>;
-  }
+  const rows = source === 'weight' ? meta.shape[0] : tokens.length;
+  const cols = source === 'weight' ? meta.shape[1] ?? 1 : manifest.config.d_model;
 
-  const rows = paramMeta.shape[0];
-  const cols = paramMeta.shape[1] || 1;
-
-  const getWeightVal = (r: number, c: number) => {
+  const getWeightVal = (r: number, c: number): number => {
     if (!tensorData) return 0;
-    return tensorData[r * cols + c] || 0;
+    return tensorData[r * cols + c] ?? 0;
   };
 
-  const actMatrix = useMemo(() => {
-    const layer = target.layer;
-    return trace.blocks[layer].resid_post;
-  }, [trace, target.layer]);
+  const layerTrace = trace.layers[target.layer];
+  const actMatrix = !layerTrace.skipped
+    ? (layerTrace as ActiveLayerTrace).residualAfterMlp
+    : trace.tokEmb;
 
-  const getActVal = (r: number, c: number) => {
-    return actMatrix[r]?.[c] || 0;
+  const getActVal = (r: number, c: number): number => {
+    return actMatrix[r]?.[c] ?? 0;
   };
-
-  const gridRows = Math.min(rows, 10);
-  const gridCols = Math.min(cols, 10);
 
   return (
-    <div className="scene-view level-4-view">
+    <div className="scene-stage level4-stage">
       <div className="l4-header">
         <div>
-          <h2 className="l4-title mono">{paramMeta.name}</h2>
-          <span className="badge-chip mono">
-            {paramMeta.shape.join(' × ')} · {paramMeta.count.toLocaleString()} parameters · float16
+          <h2>Tensor Inspector: {meta.name}</h2>
+          <span className="mono l4-meta">
+            Shape [{meta.shape.join(' × ')}] · {meta.count.toLocaleString()} parameters · {meta.dtype}
           </span>
         </div>
 
-        <div className="l4-mode-controls mono">
+        <div className="l4-controls">
           <button
             type="button"
-            className={`seg-btn ${sourceKind === 'weight' ? 'is-active' : ''}`}
-            onClick={() => setSourceKind('weight')}
+            className={`seg-btn mono ${source === 'weight' ? 'is-active' : ''}`}
+            onClick={() => setSource('weight')}
           >
             Weights Matrix
           </button>
           <button
             type="button"
-            className={`seg-btn ${sourceKind === 'activation' ? 'is-active' : ''}`}
-            onClick={() => setSourceKind('activation')}
+            className={`seg-btn mono ${source === 'activation' ? 'is-active' : ''}`}
+            onClick={() => setSource('activation')}
           >
             Runtime Activation Matrix
+          </button>
+          <button
+            type="button"
+            className={`seg-btn mono ${showTable ? 'is-active' : ''}`}
+            onClick={() => setShowTable((v) => !v)}
+          >
+            {showTable ? 'Hide numeric grid' : 'Show numeric grid'}
           </button>
         </div>
       </div>
 
-      <div className="l4-selector-strip mono">
-        <span>Select Parameter:</span>
-        {sourceKind === 'weight' && (
-          <select
-            className="select-input"
-            value={paramMeta.name}
-            onChange={(e) => onSelect(buildParamSelection(e.target.value))}
-          >
-            {manifest.tensors.map((t) => (
-              <option key={t.name} value={t.name}>
-                {t.name} [{t.shape.join('×')}]
-              </option>
-            ))}
-          </select>
-        )}
-
-        <button
-          type="button"
-          className={`seg-btn ${showGrid ? 'is-active' : ''}`}
-          onClick={() => setShowGrid((v) => !v)}
-        >
-          {showGrid ? 'Hide numeric grid' : 'Show numeric grid'}
-        </button>
-      </div>
-
-      {sourceKind === 'weight' ? (
-        <>
-          <p className="param-role">{paramMeta.role}</p>
-          {tensorData ? (
-            <CanvasHeatmap
-              title={paramMeta.name}
-              rows={rows}
-              cols={cols}
-              getValue={getWeightVal}
-              mode="diverging"
-              selectedCell={
-                target.matrix === paramMeta.name
-                  ? { row: target.row, col: target.col }
-                  : null
-              }
-              onCellClick={(r, c) =>
-                onSelect(buildParamSelection(paramMeta.name, r, c), true)
-              }
-              height={260}
-            />
-          ) : (
-            <div className="empty-notice">Loading weight tensor from worker...</div>
-          )}
-        </>
-      ) : (
+      <div className="l4-body">
         <CanvasHeatmap
-          title={`Block ${target.layer} Head ${target.head} Key Activations (${tokens.length} tokens × 32)`}
-          rows={actMatrix.length}
-          cols={actMatrix[0].length}
-          getValue={getActVal}
+          rows={rows}
+          cols={cols}
+          getValue={source === 'weight' ? getWeightVal : getActVal}
           mode="diverging"
-          height={220}
+          title={`${meta.name} — ${source === 'weight' ? 'Learned Weights' : 'Live Activations'}`}
+          selectedCell={
+            source === 'weight' && target.matrix === meta.name
+              ? { row: target.row, col: target.col }
+              : null
+          }
+          onCellClick={(r, c) => onSelect(buildParamSelection(meta.name, r, c), true)}
+          height={280}
         />
-      )}
 
-      {showGrid && (
-        <div className="numeric-grid-wrap">
-          <div className="numeric-grid-caption mono">
-            Showing top-left {gridRows}×{gridCols} real entries (click any weight entry to open Level 5)
-          </div>
-          <table className="numeric-table mono">
-            <thead>
-              <tr>
-                <th />
-                {Array.from({ length: gridCols }, (_, c) => (
-                  <th key={c}>c{c}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {Array.from({ length: gridRows }, (_, r) => (
-                <tr key={r}>
-                  <th>r{r}</th>
-                  {Array.from({ length: gridCols }, (_, c) => {
-                    const val = getWeightVal(r, c);
-                    return (
-                      <td
-                        key={c}
-                        onClick={() =>
-                          onSelect(buildParamSelection(paramMeta.name, r, c), true)
-                        }
-                        style={{ backgroundColor: divergingColor(val / 1.5) }}
-                      >
-                        {formatNum(val, 3)}
-                      </td>
-                    );
-                  })}
+        {showTable && (
+          <div className="l4-table-card">
+            <div className="table-caption mono">
+              First 8×8 slice of {meta.name}:
+            </div>
+            <table className="l4-num-table mono">
+              <thead>
+                <tr>
+                  <th>r\c</th>
+                  {Array.from({ length: Math.min(8, cols) }, (_, c) => (
+                    <th key={c}>c{c}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {Array.from({ length: Math.min(8, rows) }, (_, r) => (
+                  <tr key={r}>
+                    <th>r{r}</th>
+                    {Array.from({ length: Math.min(8, cols) }, (_, c) => {
+                      const v = source === 'weight' ? getWeightVal(r, c) : getActVal(r, c);
+                      return (
+                        <td
+                          key={c}
+                          onClick={() => onSelect(buildParamSelection(meta.name, r, c), true)}
+                          style={{ backgroundColor: divergingColor(v / 1.5) }}
+                        >
+                          {v.toFixed(3)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
+interface Level5Props {
+  client: TransformerEngineClient;
+  manifest: ModelManifest;
+  replay: TrainingReplayData | null;
+  target: SelectionTarget;
+  onSelect: (sel: string, zoomIn?: boolean) => void;
+  onOpenReplay: () => void;
+}
+
 export function Level5View({
-  target,
-  manifest,
   client,
+  manifest,
   replay,
+  target,
   onSelect,
   onOpenReplay,
-}: Level345Props) {
+}: Level5Props) {
   const [scalarVal, setScalarVal] = useState<number | null>(null);
 
-  const paramMeta = useMemo(() => {
-    if (!manifest) return null;
-    return (
-      manifest.tensors.find((t) => t.name === target.matrix) ||
-      manifest.tensors[0]
-    );
-  }, [manifest, target.matrix]);
+  const paramMeta = useMemo(
+    () => manifest.tensors.find((t) => t.name === target.matrix) ?? manifest.tensors[0],
+    [manifest, target.matrix]
+  );
+
+  const cols = paramMeta.shape[1] ?? 1;
+  const flatIdx = target.row * cols + target.col;
 
   useEffect(() => {
-    if (!client || !paramMeta) return;
-    client.getTensor(paramMeta.name).then((buf) => {
-      const cols = paramMeta.shape[1] || 1;
-      const idx = target.row * cols + target.col;
-      setScalarVal(buf[idx] ?? 0);
+    let alive = true;
+    void client.getTensor(paramMeta.name).then((buf) => {
+      if (alive) {
+        setScalarVal(buf[flatIdx] ?? 0);
+      }
     });
-  }, [client, paramMeta, target.row, target.col]);
-
-  if (!paramMeta) {
-    return <div className="scene-view level-5-view">Loading scalar coordinate...</div>;
-  }
-
-  const cols = paramMeta.shape[1] || 1;
-  const flatIdx = target.row * cols + target.col;
+    return () => {
+      alive = false;
+    };
+  }, [client, paramMeta.name, flatIdx]);
 
   const trajectoryKey = `${paramMeta.name}@${target.row},${target.col}`;
   const trajectory = replay?.trajectories?.[trajectoryKey] ?? null;
 
   return (
-    <div className="scene-view level-5-view">
-      <div className="l5-header">
-        <div>
+    <div className="scene-stage level5-stage">
+      <div className="l5-hero">
+        <div className="hero-left">
           <span className="badge-chip mono">Single Scalar Coordinate</span>
-          <h2 className="l5-title mono">
+          <h2>
             {paramMeta.name}[{target.row}, {target.col}]
           </h2>
-          <span className="param-role">{paramMeta.role}</span>
+          <p className="hero-role">{paramMeta.role}</p>
         </div>
 
-        <div className="scalar-hero-badge mono">
-          <span className="scalar-label">Real Float16 Value</span>
-          <span className="scalar-number">
+        <div className="hero-value-card mono">
+          <span className="card-label">Real Float16 Value</span>
+          <span className="card-value">
             {scalarVal !== null ? formatNum(scalarVal, 5) : '...'}
           </span>
         </div>
       </div>
 
-      <div className="l5-cards-grid">
-        <div className="l5-card">
-          <h3>Coordinate metadata</h3>
-          <dl className="mono metadata-dl">
+      <div className="l5-grid">
+        <div className="l5-meta-card">
+          <h3>Coordinate Details</h3>
+          <dl className="mono meta-dl">
             <dt>Tensor:</dt>
             <dd>{paramMeta.name}</dd>
             <dt>Row (Input Dim):</dt>
@@ -446,10 +440,11 @@ export function Level5View({
             <dt>Col (Output Dim):</dt>
             <dd>{target.col} / {cols}</dd>
             <dt>Flat Buffer Offset:</dt>
-            <dd>{flatIdx.toLocaleString()} (byte offset {flatIdx * 2})</dd>
+            <dd>{flatIdx.toLocaleString()} (byte {flatIdx * 2})</dd>
             <dt>Storage Type:</dt>
             <dd>IEEE 754 float16 (2 bytes)</dd>
           </dl>
+
           <div className="hist-axis mono">
             <span>min {formatNum(paramMeta.stats.min, 3)}</span>
             <span>mean {formatNum(paramMeta.stats.mean, 3)}</span>
@@ -457,36 +452,28 @@ export function Level5View({
           </div>
         </div>
 
-        <div className="l5-card">
-          <h3>Recorded training history</h3>
+        <div className="l5-trajectory-card">
+          <h3>Recorded Training Trajectory</h3>
           {trajectory ? (
             <ScalarTrajectoryChart points={trajectory} />
           ) : (
             <div className="untracked-note">
               <p>
-                This coordinate was trained identically by gradient descent, though only 12 coordinates were logged across every checkpoint to keep files small.
+                This coordinate was trained identically by stochastic gradient descent with AdamW, though only select coordinates were logged across every checkpoint to preserve bandwidth.
               </p>
               <button
                 type="button"
                 className="btn-inline"
-                onClick={() =>
-                  onSelect(buildParamSelection('blocks.0.attn.c_attn.weight', 0, 0), true)
-                }
+                onClick={() => onSelect('blocks.0.attn.c_attn.weight@0,0', true)}
               >
                 Jump to logged coordinate (Block 0 c_attn [0,0]) →
               </button>
             </div>
           )}
 
-          {onOpenReplay && (
-            <button
-              type="button"
-              className="seg-btn full-width"
-              onClick={onOpenReplay}
-            >
-              Open Full Training Replay (1,500 Steps) →
-            </button>
-          )}
+          <button type="button" className="seg-btn full-width" onClick={onOpenReplay}>
+            Open Full Training Replay (1,500 Steps) →
+          </button>
         </div>
       </div>
     </div>
@@ -500,7 +487,7 @@ function ScalarTrajectoryChart({ points }: { points: number[] }) {
 
   const w = 400;
   const h = 120;
-  const pad = 12;
+  const pad = 14;
 
   const path = points
     .map((pt, i) => {

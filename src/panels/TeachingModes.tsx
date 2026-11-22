@@ -1,28 +1,61 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { SCALE_LADDER_STOPS } from '../content/atlasContent';
 import type { TransformerEngineClient } from '../engine/client';
 import type {
   AblationConfig,
   EngineTraceResult,
   ModelManifest,
   TokenizerData,
-  TrainingReplayData,
 } from '../engine/types';
-import type { TeachingMode } from '../state/urlState';
-import { buildParamSelection, hasActiveAblation } from '../state/urlState';
-import { formatNum, formatToken, topIndices } from '../utils/color';
+import {
+  buildParamSelection,
+  hasActiveAblation,
+  type TeachingMode,
+} from '../state/urlState';
+import {
+  computeSampledDistribution,
+  formatNum,
+  formatToken,
+  sampleFromDistribution,
+} from '../utils/color';
 import { CanvasHeatmap } from '../scene/CanvasHeatmap';
+
+export interface ReplayCheckpoint {
+  step: number;
+  train_loss: number;
+  val_loss: number;
+  scalars: Record<string, number>;
+  prompts: {
+    prompt: string;
+    completion: string;
+    top5: { id: number; token: string; prob: number }[];
+  }[];
+}
+
+export interface TrainingReplayData {
+  version: number;
+  tracked_scalars_meta: {
+    key: string;
+    param: string;
+    coord: number[];
+    description: string;
+  }[];
+  loss_curve: { step: number; train_loss: number; val_loss: number }[];
+  checkpoints: ReplayCheckpoint[];
+  trajectories?: Record<string, number[]>;
+}
 
 export interface TeachingModePanelProps {
   mode: TeachingMode;
   onClose: () => void;
   ablation: AblationConfig;
   onChangeAblation: (next: AblationConfig) => void;
-  baseline: EngineTraceResult | null;
+  baseline: EngineTraceResult;
   ablated: EngineTraceResult | null;
   replay: TrainingReplayData | null;
   manifest: ModelManifest;
   tokenizer: TokenizerData;
-  client: TransformerEngineClient | null;
+  client: TransformerEngineClient;
   onInspectScalar: (sel: string) => void;
 }
 
@@ -58,7 +91,7 @@ export function TeachingModePanel({
 
       {mode === 'ablate' && (
         <AblationView
-          baseline={baseline!}
+          baseline={baseline}
           ablated={ablated}
           ablation={ablation}
           tokenizer={tokenizer}
@@ -75,14 +108,14 @@ export function TeachingModePanel({
 
       {mode === 'sampling' && (
         <SamplingView
-          baseline={baseline!}
+          baseline={baseline}
           tokenizer={tokenizer}
         />
       )}
 
       {mode === 'inspector' && (
         <ParameterInspectorView
-          client={client!}
+          client={client}
           manifest={manifest}
           onInspectScalar={onInspectScalar}
         />
@@ -107,117 +140,90 @@ function AblationView({
   onChange: (next: AblationConfig) => void;
 }) {
   const active = hasActiveAblation(ablation);
-  const current = ablated || baseline;
 
-  const baseTop = useMemo(() => {
-    const last = baseline.trace.logits[baseline.trace.logits.length - 1];
-    return topIndices(last, 5).map((id) => ({
-      id,
-      token: tokenizer.id_to_token[id] ?? `<${id}>`,
-      logit: last[id],
-    }));
-  }, [baseline, tokenizer]);
-
-  const ablTop = useMemo(() => {
-    const last = current.trace.logits[current.trace.logits.length - 1];
-    return topIndices(last, 5).map((id) => ({
-      id,
-      token: tokenizer.id_to_token[id] ?? `<${id}>`,
-      logit: last[id],
-    }));
-  }, [current, tokenizer]);
-
-  const toggleBlock = (b: number) => {
-    const curr = ablation.zeroBlocks || [];
-    const next = curr.includes(b) ? curr.filter((x) => x !== b) : [...curr, b];
-    onChange({ ...ablation, zeroBlocks: next });
-  };
-
-  const toggleMlp = (b: number) => {
-    const curr = ablation.zeroMlpLayers || [];
-    const next = curr.includes(b) ? curr.filter((x) => x !== b) : [...curr, b];
-    onChange({ ...ablation, zeroMlpLayers: next });
-  };
-
-  const toggleHead = (layer: number, head: number) => {
-    const curr = ablation.zeroHeads || [];
-    const exists = curr.some(([l, h]) => l === layer && h === head);
+  const toggleHead = (l: number, h: number) => {
+    const cur = ablation.disabledHeads ?? [];
+    const exists = cur.some(([a, b]) => a === l && b === h);
     const next = exists
-      ? curr.filter(([l, h]) => !(l === layer && h === head))
-      : [...curr, [layer, head] as [number, number]];
-    onChange({ ...ablation, zeroHeads: next });
+      ? cur.filter(([a, b]) => !(a === l && b === h))
+      : [...cur, [l, h] as [number, number]];
+    onChange({ ...ablation, disabledHeads: next });
   };
 
-  const reset = () => onChange({});
+  const toggleNumList = (
+    key: 'disabledAttnBlocks' | 'disabledMlpBlocks' | 'disabledLayers',
+    l: number
+  ) => {
+    const cur = ablation[key] ?? [];
+    const next = cur.includes(l) ? cur.filter((x) => x !== l) : [...cur, l];
+    onChange({ ...ablation, [key]: next });
+  };
+
+  const toggleRes = (kind: 'attn' | 'mlp', l: number) => {
+    const cur = ablation.disabledResiduals ?? [];
+    const exists = cur.some(([k, idx]) => k === kind && idx === l);
+    const next = exists
+      ? cur.filter(([k, idx]) => !(k === kind && idx === l))
+      : [...cur, [kind, l] as ['attn' | 'mlp', number]];
+    onChange({ ...ablation, disabledResiduals: next });
+  };
+
+  const toggleLn = (kind: 'ln_1' | 'ln_2' | 'ln_f', l: number) => {
+    const cur = ablation.disabledLayerNorms ?? [];
+    const exists = cur.some(([k, idx]) => k === kind && idx === l);
+    const next = exists
+      ? cur.filter(([k, idx]) => !(k === kind && idx === l))
+      : [...cur, [kind, l] as ['ln_1' | 'ln_2' | 'ln_f', number]];
+    onChange({ ...ablation, disabledLayerNorms: next });
+  };
+
+  const compareIds = useMemo(() => {
+    const idSet = new Set<number>();
+    const topBase = baseline.trace.finalProbs
+      .map((p, id) => ({ id, p }))
+      .sort((a, b) => b.p - a.p)
+      .slice(0, 6);
+    topBase.forEach((x) => idSet.add(x.id));
+    if (ablated) {
+      ablated.trace.finalProbs
+        .map((p, id) => ({ id, p }))
+        .sort((a, b) => b.p - a.p)
+        .slice(0, 4)
+        .forEach((x) => idSet.add(x.id));
+    }
+    return Array.from(idSet)
+      .map((id) => ({
+        id,
+        text: tokenizer.vocab[id] ?? `<${id}>`,
+        baseProb: baseline.trace.finalProbs[id] ?? 0,
+        ablProb: ablated ? ablated.trace.finalProbs[id] ?? 0 : null,
+      }))
+      .sort((a, b) => (b.ablProb ?? b.baseProb) - (a.ablProb ?? a.baseProb));
+  }, [baseline, ablated, tokenizer]);
 
   return (
-    <div className="mode-content-body ablation-layout">
-      <div className="ablation-controls-panel">
-        <div className="ablation-panel-title">
-          <h3>Knockout Toggles</h3>
-          {active && (
-            <button type="button" className="btn-inline" onClick={reset}>
-              Reset all ablations
-            </button>
-          )}
-        </div>
+    <div className="mode-body ablation-grid">
+      <div className="ablation-controls">
+        <h3>Intervention Toggles</h3>
         <p className="card-subtext">
-          Zero out specific layers or attention heads at runtime to test their causal contribution.
+          Zero specific components during inference to observe causal effects on prediction:
         </p>
 
-        <div className="ablation-group">
-          <span className="mono ab-group-label">Zero entire Transformer Block:</span>
-          <div className="toggle-btn-row">
-            {[0, 1, 2, 3].map((b) => {
-              const on = (ablation.zeroBlocks || []).includes(b);
-              return (
-                <button
-                  key={b}
-                  type="button"
-                  className={`toggle-btn mono ${on ? 'is-ablated' : ''}`}
-                  onClick={() => toggleBlock(b)}
-                >
-                  Block {b} {on ? '(ZEROED)' : ''}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="ablation-group">
-          <span className="mono ab-group-label">Zero MLP sublayer:</span>
-          <div className="toggle-btn-row">
-            {[0, 1, 2, 3].map((b) => {
-              const on = (ablation.zeroMlpLayers || []).includes(b);
-              return (
-                <button
-                  key={b}
-                  type="button"
-                  className={`toggle-btn mono ${on ? 'is-ablated' : ''}`}
-                  onClick={() => toggleMlp(b)}
-                >
-                  MLP {b} {on ? '(ZEROED)' : ''}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="ablation-group">
-          <span className="mono ab-group-label">Zero individual Attention Heads:</span>
-          <div className="heads-ablation-grid">
+        <div className="toggle-group">
+          <span className="mono group-title">Attention Heads (disable Q·Kᵀ):</span>
+          <div className="head-toggles-grid">
             {[0, 1, 2, 3].map((l) => (
-              <div key={l} className="head-row-wrap">
-                <span className="mono head-layer-label">L{l}:</span>
+              <div key={l} className="head-row">
+                <span className="mono l-tag">L{l}:</span>
                 {[0, 1, 2, 3].map((h) => {
-                  const on = (ablation.zeroHeads || []).some(
+                  const on = (ablation.disabledHeads ?? []).some(
                     ([bl, bh]) => bl === l && bh === h
                   );
                   return (
                     <button
                       key={h}
                       type="button"
-                      className={`head-toggle-btn mono ${on ? 'is-ablated' : ''}`}
+                      className={`head-btn mono ${on ? 'is-ablated' : ''}`}
                       onClick={() => toggleHead(l, h)}
                     >
                       H{h}
@@ -228,53 +234,114 @@ function AblationView({
             ))}
           </div>
         </div>
-      </div>
 
-      <div className="ablation-diff-panel">
-        <div className="diff-columns-grid">
-          <div className="diff-col">
-            <span className="badge-chip mono">Baseline Prediction</span>
-            <div className="preds-list-box">
-              {baseTop.map((p, idx) => (
-                <div key={p.id} className="pred-row">
-                  <span className="pred-rank mono">#{idx + 1}</span>
-                  <span className="pred-tok mono">“{formatToken(p.token)}”</span>
-                  <span className="pred-val mono">{formatNum(p.logit, 2)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="diff-col">
-            <span className={`badge-chip mono ${active ? 'delta' : ''}`}>
-              {active ? 'Ablated Prediction (Live)' : 'Ablated (None active)'}
-            </span>
-            <div className="preds-list-box">
-              {ablTop.map((p, idx) => {
-                const baseLogit = baseTop.find((b) => b.id === p.id)?.logit ?? 0;
-                const diff = p.logit - baseLogit;
-                return (
-                  <div key={p.id} className="pred-row">
-                    <span className="pred-rank mono">#{idx + 1}</span>
-                    <span className="pred-tok mono">“{formatToken(p.token)}”</span>
-                    <span className="pred-val mono">{formatNum(p.logit, 2)}</span>
-                    {active && Math.abs(diff) > 0.01 && (
-                      <span className={`diff-tag mono ${diff > 0 ? 'pos' : 'neg'}`}>
-                        {diff > 0 ? `+${formatNum(diff, 2)}` : formatNum(diff, 2)}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+        <div className="toggle-group">
+          <span className="mono group-title">Sublayers:</span>
+          <div className="sublayer-toggles">
+            {[0, 1, 2, 3].map((l) => (
+              <div key={l} className="sublayer-row">
+                <span className="mono l-tag">L{l}:</span>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledAttnBlocks ?? []).includes(l) ? 'is-active' : ''}`}
+                  onClick={() => toggleNumList('disabledAttnBlocks', l)}
+                >
+                  Attn {l}
+                </button>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledMlpBlocks ?? []).includes(l) ? 'is-active' : ''}`}
+                  onClick={() => toggleNumList('disabledMlpBlocks', l)}
+                >
+                  MLP {l}
+                </button>
+              </div>
+            ))}
           </div>
         </div>
 
-        <div className="ablation-summary-note">
-          <p>
-            Ablation directly zeroes the output tensors inside the forward pass before residual
-            addition. Notice how zeroing Block 2 alters pronoun tracking and sentence grammar.
-          </p>
+        <div className="toggle-group">
+          <span className="mono group-title">Residual Skips & LayerNorms:</span>
+          <div className="res-ln-toggles">
+            {[0, 1, 2, 3].map((l) => (
+              <div key={l} className="sublayer-row">
+                <span className="mono l-tag">L{l}:</span>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledResiduals ?? []).some(([k, idx]) => k === 'attn' && idx === l) ? 'is-active' : ''}`}
+                  onClick={() => toggleRes('attn', l)}
+                >
+                  Skip Attn
+                </button>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledResiduals ?? []).some(([k, idx]) => k === 'mlp' && idx === l) ? 'is-active' : ''}`}
+                  onClick={() => toggleRes('mlp', l)}
+                >
+                  Skip MLP
+                </button>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledLayerNorms ?? []).some(([k, idx]) => k === 'ln_1' && idx === l) ? 'is-active' : ''}`}
+                  onClick={() => toggleLn('ln_1', l)}
+                >
+                  LN1
+                </button>
+                <button
+                  type="button"
+                  className={`seg-btn mono ${(ablation.disabledLayerNorms ?? []).some(([k, idx]) => k === 'ln_2' && idx === l) ? 'is-active' : ''}`}
+                  onClick={() => toggleLn('ln_2', l)}
+                >
+                  LN2
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {active && (
+          <button
+            type="button"
+            className="seg-btn"
+            style={{ marginTop: 12 }}
+            onClick={() => onChange({})}
+          >
+            Reset all ablations
+          </button>
+        )}
+      </div>
+
+      <div className="ablation-results">
+        <h3>Live Output Probability Comparison</h3>
+        <div className="comparison-list">
+          {compareIds.map((item) => {
+            const basePct = (item.baseProb * 100).toFixed(1);
+            const ablPct = item.ablProb !== null ? (item.ablProb * 100).toFixed(1) : null;
+            return (
+              <div key={item.id} className="comp-row">
+                <span className="comp-tok mono">“{formatToken(item.text)}”</span>
+                <div className="comp-tracks">
+                  <div className="track-row">
+                    <span className="track-label mono">Base:</span>
+                    <div className="bar-track">
+                      <div className="bar-fill base" style={{ width: `${basePct}%` }} />
+                    </div>
+                    <span className="track-pct mono">{basePct}%</span>
+                  </div>
+
+                  {ablPct !== null && (
+                    <div className="track-row">
+                      <span className="track-label mono">Ablated:</span>
+                      <div className="bar-track">
+                        <div className="bar-fill ablated" style={{ width: `${ablPct}%` }} />
+                      </div>
+                      <span className="track-pct mono">{ablPct}%</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -292,9 +359,9 @@ function TrainingReplayView({
 
   if (!replay || !replay.checkpoints || replay.checkpoints.length === 0) {
     return (
-      <div className="mode-content-body">
+      <div className="mode-body">
         <div className="empty-notice">
-          Training replay data is loading or was not found in public/model/training_replay.json.
+          Training replay data loading or not found in public/model/training_replay.json.
         </div>
       </div>
     );
@@ -304,12 +371,14 @@ function TrainingReplayView({
   const current = checkpoints[Math.min(stepIdx, checkpoints.length - 1)];
 
   return (
-    <div className="mode-content-body replay-layout">
-      <div className="replay-timeline-card">
+    <div className="mode-body replay-layout">
+      <div className="replay-timeline">
         <div className="timeline-header">
           <span className="badge-chip mono">Checkpoint {stepIdx + 1} / {checkpoints.length}</span>
-          <span className="mono step-tag">Training Step: {current.step}</span>
-          <span className="mono loss-tag">Loss: {formatNum(current.loss, 3)}</span>
+          <span className="mono step-tag">Step: {current.step}</span>
+          <span className="mono loss-tag">
+            Train Loss: {current.train_loss?.toFixed(3) ?? '—'} · Val Loss: {current.val_loss?.toFixed(3) ?? '—'}
+          </span>
         </div>
 
         <input
@@ -329,29 +398,34 @@ function TrainingReplayView({
         </div>
       </div>
 
-      <div className="replay-details-grid">
-        <div className="replay-sample-box">
-          <h4 className="mono">Generated text at step {current.step}:</h4>
-          <blockquote className="generated-story-text">
-            “{current.sample || 'No sample recorded for this checkpoint'}”
-          </blockquote>
+      <div className="replay-grid">
+        <div className="replay-prompts-card">
+          <h4>Sample Generations at Step {current.step}:</h4>
+          <div className="prompts-list">
+            {(current.prompts ?? []).map((p, idx) => (
+              <div key={idx} className="prompt-sample-item">
+                <div className="prompt-prompt mono">“{p.prompt}”</div>
+                <div className="prompt-completion">→ “{p.completion}”</div>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="replay-coords-box">
-          <h4 className="mono">Logged Coordinates at step {current.step}:</h4>
+        <div className="replay-scalars-card">
+          <h4>Tracked Weight Coordinates at Step {current.step}:</h4>
           <div className="coords-table-wrap">
-            <table className="numeric-table mono">
+            <table className="coords-table mono">
               <thead>
                 <tr>
-                  <th>Tensor Coordinate</th>
+                  <th>Coordinate</th>
                   <th>Value</th>
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(current.coords || {}).map(([key, val]) => (
+                {Object.entries(current.scalars ?? {}).map(([key, val]) => (
                   <tr key={key} onClick={() => onInspectScalar(`param:${key}`)}>
                     <td className="coord-key">{key}</td>
-                    <td className="coord-val">{formatNum(val, 4)}</td>
+                    <td className="coord-val">{val.toFixed(4)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -370,52 +444,37 @@ function SamplingView({
   baseline: EngineTraceResult;
   tokenizer: TokenizerData;
 }) {
-  const [temperature, setTemperature] = useState(0.7);
+  const [temperature, setTemperature] = useState(0.8);
   const [topK, setTopK] = useState(10);
   const [topP, setTopP] = useState(0.9);
+  const [sampledWord, setSampledWord] = useState<string | null>(null);
 
-  const rawLogits = baseline.trace.logits[baseline.trace.logits.length - 1];
+  const dist = useMemo(() => {
+    return computeSampledDistribution(
+      baseline.trace.finalLogits,
+      temperature,
+      topK,
+      topP
+    );
+  }, [baseline.trace.finalLogits, temperature, topK, topP]);
 
-  const processedProbs = useMemo(() => {
-    const scaled = Array.from(rawLogits).map((l) => l / Math.max(0.05, temperature));
-    let maxScaled = -Infinity;
-    for (const v of scaled) if (v > maxScaled) maxScaled = v;
-
-    const exps = scaled.map((v) => Math.exp(v - maxScaled));
-    const sumExp = exps.reduce((a, b) => a + b, 0);
-    const softmax = exps.map((e) => e / sumExp);
-
-    const indexed = softmax.map((p, idx) => ({ id: idx, p }));
-    indexed.sort((a, b) => b.p - a.p);
-
-    const truncatedK = indexed.slice(0, Math.max(1, topK));
-
-    let cum = 0;
-    const truncatedP: { id: number; p: number }[] = [];
-    for (const item of truncatedK) {
-      truncatedP.push(item);
-      cum += item.p;
-      if (cum >= topP && truncatedP.length >= 1) break;
+  const handleRoll = () => {
+    if (dist.length > 0) {
+      const id = sampleFromDistribution(dist);
+      setSampledWord(tokenizer.vocab[id] ?? `<${id}>`);
     }
-
-    const renormSum = truncatedP.reduce((s, it) => s + it.p, 0);
-    return truncatedP.map((it) => ({
-      id: it.id,
-      token: tokenizer.id_to_token[it.id] ?? `<${it.id}>`,
-      prob: it.p / renormSum,
-    }));
-  }, [rawLogits, temperature, topK, topP, tokenizer]);
+  };
 
   return (
-    <div className="mode-content-body sampling-layout">
-      <div className="sampling-controls-card">
+    <div className="mode-body sampling-layout">
+      <div className="sampling-controls">
         <h3>Decoding Parameters</h3>
 
-        <div className="control-slider-group">
-          <div className="slider-label-row mono">
+        <div className="slider-group">
+          <div className="slider-header mono">
             <span>Temperature: {temperature.toFixed(2)}</span>
-            <span className="control-desc">
-              {temperature < 0.2 ? 'Greedy / Deterministic' : temperature > 1.2 ? 'High entropy / Creative' : 'Balanced'}
+            <span className="slider-sub">
+              {temperature < 0.3 ? 'Deterministic' : temperature > 1.2 ? 'Creative/Noisy' : 'Balanced'}
             </span>
           </div>
           <input
@@ -428,25 +487,25 @@ function SamplingView({
           />
         </div>
 
-        <div className="control-slider-group">
-          <div className="slider-label-row mono">
-            <span>Top-k: {topK}</span>
-            <span className="control-desc">Truncate to k highest logits</span>
+        <div className="slider-group">
+          <div className="slider-header mono">
+            <span>Top-K: {topK}</span>
+            <span className="slider-sub">Truncate to k highest logits</span>
           </div>
           <input
             type="range"
             min={1}
-            max={50}
+            max={40}
             step={1}
             value={topK}
             onChange={(e) => setTopK(Number.parseInt(e.target.value, 10))}
           />
         </div>
 
-        <div className="control-slider-group">
-          <div className="slider-label-row mono">
-            <span>Top-p (Nucleus): {topP.toFixed(2)}</span>
-            <span className="control-desc">Smallest set whose cumulative mass ≥ p</span>
+        <div className="slider-group">
+          <div className="slider-header mono">
+            <span>Top-P (Nucleus): {topP.toFixed(2)}</span>
+            <span className="slider-sub">Smallest set with cum prob ≥ p</span>
           </div>
           <input
             type="range"
@@ -457,21 +516,33 @@ function SamplingView({
             onChange={(e) => setTopP(Number.parseFloat(e.target.value))}
           />
         </div>
+
+        <div className="roll-action-box">
+          <button type="button" className="seg-btn is-active" onClick={handleRoll}>
+            🎲 Roll Random Token
+          </button>
+          {sampledWord && (
+            <div className="roll-result mono">
+              Sampled: <b>“{formatToken(sampledWord)}”</b>
+            </div>
+          )}
+        </div>
       </div>
 
-      <div className="sampling-distribution-card">
-        <h3 className="mono">Effective Token Sampling Probabilities</h3>
-        <div className="sampling-bars-list">
-          {processedProbs.map((item, idx) => {
+      <div className="sampling-dist">
+        <h3>Effective Sampling Distribution ({dist.length} candidate tokens)</h3>
+        <div className="dist-list">
+          {dist.map((item, idx) => {
+            const word = tokenizer.vocab[item.id] ?? `<${item.id}>`;
             const pct = (item.prob * 100).toFixed(1);
             return (
-              <div key={item.id} className="sampling-bar-row">
-                <span className="mono sample-rank">#{idx + 1}</span>
-                <span className="mono sample-token">“{formatToken(item.token)}”</span>
-                <div className="sampling-track">
-                  <div className="sampling-fill" style={{ width: `${pct}%` }} />
+              <div key={item.id} className="dist-row">
+                <span className="dist-rank mono">#{idx + 1}</span>
+                <span className="dist-word mono">“{formatToken(word)}”</span>
+                <div className="dist-track">
+                  <div className="dist-fill" style={{ width: `${pct}%` }} />
                 </div>
-                <span className="mono sample-pct">{pct}%</span>
+                <span className="dist-pct mono">{pct}%</span>
               </div>
             );
           })}
@@ -490,51 +561,49 @@ function ParameterInspectorView({
   manifest: ModelManifest;
   onInspectScalar: (sel: string) => void;
 }) {
-  const [selectedName, setSelectedName] = useState(manifest.tensors[0]?.name || '');
+  const [selectedName, setSelectedName] = useState(manifest.tensors[0]?.name ?? '');
   const [data, setData] = useState<Float32Array | null>(null);
 
-  const meta = useMemo(() => {
-    return manifest.tensors.find((t) => t.name === selectedName) || manifest.tensors[0];
-  }, [manifest, selectedName]);
+  const meta = useMemo(
+    () => manifest.tensors.find((t) => t.name === selectedName) ?? manifest.tensors[0],
+    [manifest, selectedName]
+  );
 
-  useState(() => {
-    if (!client || !meta) return;
-    client.getTensor(meta.name).then((buf) => setData(buf));
-  });
+  useEffect(() => {
+    let alive = true;
+    void client.getTensor(meta.name).then((buf) => {
+      if (alive) setData(buf);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [client, meta.name]);
 
   const rows = meta.shape[0];
-  const cols = meta.shape[1] || 1;
+  const cols = meta.shape[1] ?? 1;
 
   const getValue = (r: number, c: number) => {
     if (!data) return 0;
-    return data[r * cols + c] || 0;
+    return data[r * cols + c] ?? 0;
   };
 
   return (
-    <div className="mode-content-body inspector-layout">
+    <div className="mode-body inspector-layout">
       <div className="inspector-sidebar">
         {manifest.tensors.map((t) => (
           <button
             key={t.name}
             type="button"
-            className={`inspector-item-btn mono ${t.name === meta.name ? 'is-active' : ''}`}
-            onClick={() => {
-              setSelectedName(t.name);
-              client.getTensor(t.name).then((buf) => setData(buf));
-            }}
+            className={`inspector-item mono ${t.name === meta.name ? 'is-active' : ''}`}
+            onClick={() => setSelectedName(t.name)}
           >
-            <div className="inspector-row-top">
-              <span className="inspector-name">{t.name}</span>
-              <span className="inspector-shape">
-                [{t.shape.join('×')}] ({t.count.toLocaleString()})
-              </span>
-            </div>
-            <div className="inspector-row-role">{t.role}</div>
+            <div className="item-name">{t.name}</div>
+            <div className="item-shape">[{t.shape.join(' × ')}]</div>
           </button>
         ))}
       </div>
 
-      <div className="inspector-detail">
+      <div className="inspector-main">
         <p className="param-role">{meta.role}</p>
         {data && (
           <CanvasHeatmap
@@ -543,10 +612,8 @@ function ParameterInspectorView({
             cols={cols}
             getValue={getValue}
             mode="diverging"
-            onCellClick={(r, c) =>
-              onInspectScalar(buildParamSelection(meta.name, r, c))
-            }
-            height={230}
+            onCellClick={(r, c) => onInspectScalar(buildParamSelection(meta.name, r, c))}
+            height={260}
           />
         )}
         <div className="hist-axis mono">
@@ -561,82 +628,57 @@ function ParameterInspectorView({
 }
 
 function ScaleLadderView({ manifest }: { manifest: ModelManifest }) {
-  const models = [
-    {
-      name: 'This Explainer Model',
-      params: '866K',
-      layers: 4,
-      dim: 128,
-      heads: 4,
-      vocab: 2048,
-      size: '1.65 MB',
-      note: 'Runs in pure TypeScript browser worker with exact math.',
-    },
-    {
-      name: 'GPT-2 Small (2019)',
-      params: '124M',
-      layers: 12,
-      dim: 768,
-      heads: 12,
-      vocab: 50257,
-      size: '500 MB',
-      note: '143× larger. Identical Pre-LN Transformer architecture.',
-    },
-    {
-      name: 'Llama 3 8B (2024)',
-      params: '8.03B',
-      layers: 32,
-      dim: 4096,
-      heads: 32,
-      vocab: 128256,
-      size: '16 GB',
-      note: '9,268× larger. Uses RoPE, SwiGLU, and Grouped-Query Attention.',
-    },
-    {
-      name: 'Llama 3 70B (2024)',
-      params: '70.6B',
-      layers: 80,
-      dim: 8192,
-      heads: 64,
-      vocab: 128256,
-      size: '140 GB',
-      note: '81,495× larger. Multi-node GPU cluster required.',
-    },
-  ];
+  const [idx, setIdx] = useState(0);
+  const stop = SCALE_LADDER_STOPS[idx];
 
   return (
-    <div className="mode-content-body scale-layout">
-      <div className="scale-intro-card">
+    <div className="mode-body scale-layout">
+      <div className="scale-intro">
         <h3>Architectural Scaling Ladder</h3>
         <p>
-          The 4-layer miniature transformer in your browser has the same fundamental building blocks
-          (Token Embedding, Multi-Head Attention, Residual Stream, and MLP) as production LLMs.
-          The difference is scale and parameter volume.
+          Compare this {manifest.total_params.toLocaleString()}-parameter educational model against GPT-2, Llama 3, and Frontier LLMs. The foundational math (Q, K, V attention, LayerNorm, residual highway, and feed-forward MLP) is identical across 6 orders of magnitude.
         </p>
       </div>
 
-      <div className="scale-cards-grid">
-        {models.map((m, i) => (
-          <div key={m.name} className={`scale-model-card ${i === 0 ? 'is-self' : ''}`}>
-            <div className="scale-card-header">
-              <span className="scale-name mono">{m.name}</span>
-              <span className="scale-params mono">{m.params}</span>
-            </div>
-            <dl className="mono scale-dl">
-              <dt>Layers:</dt>
-              <dd>{m.layers}</dd>
-              <dt>Embedding Dim:</dt>
-              <dd>{m.dim}</dd>
-              <dt>Attention Heads:</dt>
-              <dd>{m.heads}</dd>
-              <dt>Vocabulary:</dt>
-              <dd>{m.vocab.toLocaleString()}</dd>
-              <dt>FP16 Size:</dt>
-              <dd>{m.size}</dd>
-            </dl>
-            <p className="scale-note">{m.note}</p>
-          </div>
-        ))}
+      <div className="scale-slider-card">
+        <div className="scale-header mono">
+          <span className="scale-title">{stop.name}</span>
+          <span className="scale-params">{stop.params} parameters</span>
+        </div>
+
+        <input
+          type="range"
+          min={0}
+          max={SCALE_LADDER_STOPS.length - 1}
+          value={idx}
+          onChange={(e) => setIdx(Number.parseInt(e.target.value, 10))}
+          className="scale-slider"
+        />
+
+        <div className="scale-ticks mono">
+          {SCALE_LADDER_STOPS.map((s, i) => (
+            <span
+              key={s.name}
+              className={i === idx ? 'is-active' : ''}
+              onClick={() => setIdx(i)}
+            >
+              {s.params}
+            </span>
+          ))}
+        </div>
+
+        <dl className="mono scale-dl">
+          <dt>Layers:</dt>
+          <dd>{stop.layers}</dd>
+          <dt>Hidden Dim (d_model):</dt>
+          <dd>{stop.dModel}</dd>
+          <dt>Attention Heads:</dt>
+          <dd>{stop.heads}</dd>
+          <dt>Context Window:</dt>
+          <dd>{stop.context.toLocaleString()} tokens</dd>
+        </dl>
+
+        <p className="scale-note">{stop.note}</p>
       </div>
     </div>
   );

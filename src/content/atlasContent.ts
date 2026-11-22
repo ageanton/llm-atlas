@@ -244,3 +244,78 @@ export const STATION_INFO: Record<string, StationExplorationInfo> = {
     shapeNote: 'Tied with wte: 128 × 2,048',
   },
 };
+
+export interface ScaleStop {
+  name: string;
+  params: string;
+  layers: number;
+  dModel: number;
+  heads: number;
+  context: number;
+  note: string;
+}
+
+export const SCALE_LADDER_STOPS: ScaleStop[] = [
+  {
+    name: 'TinyStories-4L-128D (This explainer)',
+    params: '866K',
+    layers: 4,
+    dModel: 128,
+    heads: 4,
+    context: 64,
+    note: 'Real miniature model executing live in your browser web worker.',
+  },
+  {
+    name: 'GPT-2 Small (2019)',
+    params: '124M',
+    layers: 12,
+    dModel: 768,
+    heads: 12,
+    context: 1024,
+    note: '143× larger than this atlas model. Uses identical Pre-LN transformer block architecture.',
+  },
+  {
+    name: 'Llama 3 8B (2024)',
+    params: '8.03B',
+    layers: 32,
+    dModel: 4096,
+    heads: 32,
+    context: 8192,
+    note: '9,268× larger than this atlas model. Adds RoPE, SwiGLU, and Grouped-Query Attention (GQA).',
+  },
+  {
+    name: 'Llama 3 70B (2024)',
+    params: '70.6B',
+    layers: 80,
+    dModel: 8192,
+    heads: 64,
+    context: 8192,
+    note: '81,495× larger than this atlas model. Requires multi-GPU cluster for inference.',
+  },
+  {
+    name: 'Frontier LLM (e.g. Gemini 1.5 Pro / GPT-4)',
+    params: '~1T+',
+    layers: 128,
+    dModel: 16384,
+    heads: 128,
+    context: 1000000,
+    note: 'Over 1,159,000× larger than this atlas model. Often uses Mixture-of-Experts routing, yet still predicts the next token through stacked attention and MLP residual updates.',
+  },
+];
+
+export function formatRegisterName(r: Register): string {
+  if (r === 'simple') return 'Simple';
+  if (r === 'sufficient') return 'Sufficient';
+  return 'Complete';
+}
+
+export function verifyQuestionChain(): boolean {
+  for (let lv = 0; lv < 5; lv++) {
+    const cur = LEVEL_SPECS[lv as ZoomLevel];
+    const next = LEVEL_SPECS[(lv + 1) as ZoomLevel];
+    if (!cur.createsQuestion || cur.createsQuestion !== next.answersQuestion) {
+      return false;
+    }
+  }
+  return true;
+}

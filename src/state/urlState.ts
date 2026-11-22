@@ -175,67 +175,72 @@ export function targetToSelectionString(target: SelectionTarget): string {
   return `block${target.layer}`;
 }
 
+export function hasActiveAblation(ablation: AblationConfig): boolean {
+  return (
+    (ablation.disabledHeads?.length ?? 0) > 0 ||
+    (ablation.disabledAttnBlocks?.length ?? 0) > 0 ||
+    (ablation.disabledMlpBlocks?.length ?? 0) > 0 ||
+    (ablation.disabledResiduals?.length ?? 0) > 0 ||
+    (ablation.disabledLayerNorms?.length ?? 0) > 0 ||
+    (ablation.disabledLayers?.length ?? 0) > 0
+  );
+}
+
 export function ablationToParam(ablation: AblationConfig): string {
   const parts: string[] = [];
-  if (ablation.zeroBlocks && ablation.zeroBlocks.length > 0) {
-    parts.push(`zb:${ablation.zeroBlocks.sort().join('+')}`);
-  }
-  if (ablation.zeroMlpLayers && ablation.zeroMlpLayers.length > 0) {
-    parts.push(`zmlp:${ablation.zeroMlpLayers.sort().join('+')}`);
-  }
-  if (ablation.zeroHeads && ablation.zeroHeads.length > 0) {
-    const heads = ablation.zeroHeads.map(([l, h]) => `${l}.${h}`).join('+');
-    parts.push(`zh:${heads}`);
-  }
-  if (ablation.freezePosition !== undefined) {
-    parts.push(`fp:${ablation.freezePosition}`);
-  }
-  return parts.join(';');
+  for (const [l, h] of ablation.disabledHeads ?? []) parts.push(`h${l}_${h}`);
+  for (const l of ablation.disabledAttnBlocks ?? []) parts.push(`a${l}`);
+  for (const l of ablation.disabledMlpBlocks ?? []) parts.push(`m${l}`);
+  for (const [kind, l] of ablation.disabledResiduals ?? []) parts.push(`r${kind}_${l}`);
+  for (const [kind, l] of ablation.disabledLayerNorms ?? []) parts.push(`n${kind}_${l}`);
+  for (const l of ablation.disabledLayers ?? []) parts.push(`l${l}`);
+  return parts.length > 0 ? parts.join(';') : '';
 }
 
 export function paramToAblation(raw: string | null): AblationConfig {
   const cfg: AblationConfig = {};
-  if (!raw) return cfg;
-
-  const chunks = raw.split(';');
-  for (const chunk of chunks) {
-    if (!chunk) continue;
-    const [k, v] = chunk.split(':');
-    if (!k || !v) continue;
-
-    if (k === 'zb') {
-      cfg.zeroBlocks = v
-        .split('+')
-        .map((x) => Number.parseInt(x, 10))
-        .filter(Number.isFinite);
-    } else if (k === 'zmlp') {
-      cfg.zeroMlpLayers = v
-        .split('+')
-        .map((x) => Number.parseInt(x, 10))
-        .filter(Number.isFinite);
-    } else if (k === 'zh') {
-      cfg.zeroHeads = v
-        .split('+')
-        .map((item) => {
-          const [l, h] = item.split('.').map((x) => Number.parseInt(x, 10));
-          return Number.isFinite(l) && Number.isFinite(h) ? ([l, h] as [number, number]) : null;
-        })
-        .filter((x): x is [number, number] => x !== null);
-    } else if (k === 'fp') {
-      const idx = Number.parseInt(v, 10);
-      if (Number.isFinite(idx)) cfg.freezePosition = idx;
+  if (!raw || raw === 'none') return cfg;
+  for (const token of raw.split(';')) {
+    if (!token) continue;
+    if (token.startsWith('h')) {
+      const [l, h] = token.slice(1).split('_').map(Number);
+      if (Number.isFinite(l) && Number.isFinite(h)) {
+        cfg.disabledHeads = [...(cfg.disabledHeads ?? []), [l, h]];
+      }
+    } else if (token.startsWith('a')) {
+      const l = Number(token.slice(1));
+      if (Number.isFinite(l)) {
+        cfg.disabledAttnBlocks = [...(cfg.disabledAttnBlocks ?? []), l];
+      }
+    } else if (token.startsWith('m')) {
+      const l = Number(token.slice(1));
+      if (Number.isFinite(l)) {
+        cfg.disabledMlpBlocks = [...(cfg.disabledMlpBlocks ?? []), l];
+      }
+    } else if (token.startsWith('r')) {
+      const [kind, lStr] = token.slice(1).split('_');
+      const l = Number(lStr);
+      if ((kind === 'attn' || kind === 'mlp') && Number.isFinite(l)) {
+        cfg.disabledResiduals = [...(cfg.disabledResiduals ?? []), [kind, l]];
+      }
+    } else if (token.startsWith('n')) {
+      const idx = token.lastIndexOf('_');
+      const kind = token.slice(1, idx);
+      const l = Number(token.slice(idx + 1));
+      if (['ln_1', 'ln_2', 'ln_f'].includes(kind) && Number.isFinite(l)) {
+        cfg.disabledLayerNorms = [
+          ...(cfg.disabledLayerNorms ?? []),
+          [kind as 'ln_1' | 'ln_2' | 'ln_f', l],
+        ];
+      }
+    } else if (token.startsWith('l')) {
+      const l = Number(token.slice(1));
+      if (Number.isFinite(l)) {
+        cfg.disabledLayers = [...(cfg.disabledLayers ?? []), l];
+      }
     }
   }
   return cfg;
-}
-
-export function hasActiveAblation(cfg: AblationConfig): boolean {
-  return (
-    Boolean(cfg.zeroBlocks && cfg.zeroBlocks.length > 0) ||
-    Boolean(cfg.zeroMlpLayers && cfg.zeroMlpLayers.length > 0) ||
-    Boolean(cfg.zeroHeads && cfg.zeroHeads.length > 0) ||
-    cfg.freezePosition !== undefined
-  );
 }
 
 function registerToShort(r: Register): string {

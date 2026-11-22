@@ -76,3 +76,57 @@ export function topIndices(arr: number[] | Float32Array, k = 5): number[] {
   pairs.sort((a, b) => b.val - a.val);
   return pairs.slice(0, k).map((p) => p.idx);
 }
+
+export interface SampledToken {
+  id: number;
+  prob: number;
+  cumProb: number;
+}
+
+export function computeSampledDistribution(
+  logits: number[],
+  temperature: number,
+  topK: number,
+  topP: number
+): SampledToken[] {
+  const t = Math.max(0.05, temperature);
+  const scaled = logits.map((l) => l / t);
+  const maxScaled = Math.max(...scaled);
+  const exps = scaled.map((s) => Math.exp(s - maxScaled));
+  const sumExp = exps.reduce((acc, v) => acc + v, 0);
+  const probs = exps.map((e) => e / (sumExp || 1e-6));
+
+  const sorted = probs
+    .map((prob, id) => ({ id, prob }))
+    .sort((a, b) => b.prob - a.prob)
+    .slice(0, Math.max(1, topK));
+
+  let cum = 0;
+  const filtered: { id: number; prob: number }[] = [];
+  for (const item of sorted) {
+    filtered.push(item);
+    cum += item.prob;
+    if (cum >= topP && filtered.length >= 1) break;
+  }
+
+  const normSum = filtered.reduce((acc, it) => acc + it.prob, 0) || 1e-6;
+  let runningCum = 0;
+  return filtered.map((it) => {
+    const p = it.prob / normSum;
+    runningCum += p;
+    return {
+      id: it.id,
+      prob: p,
+      cumProb: runningCum,
+    };
+  });
+}
+
+export function sampleFromDistribution(dist: SampledToken[]): number {
+  if (dist.length === 0) return 0;
+  const r = Math.random();
+  for (const item of dist) {
+    if (r <= item.cumProb) return item.id;
+  }
+  return dist[dist.length - 1].id;
+}
