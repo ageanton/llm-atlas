@@ -29,7 +29,7 @@ jobs:
 
       - name: Install lightweight CPU PyTorch and dependencies
         run: |
-          pip install --no-cache-dir torch --index-url [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
           pip install --no-cache-dir numpy datasets
 
       - name: Train model and export static artifacts
