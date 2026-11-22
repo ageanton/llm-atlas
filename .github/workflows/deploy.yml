@@ -1,4 +1,4 @@
-# Triggered deployment
+# Production deploy to GitHub Pages
 name: Verify Parity & Deploy to GitHub Pages
 
 on:
