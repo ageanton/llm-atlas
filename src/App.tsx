@@ -1,112 +1,123 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  type BookState,
-  DEFAULT_PROMPT,
-  isHeadDisabled,
-  hasActiveAblation,
-  stateFromUrl,
-  stateToUrl,
-  toggleHeadDisabled,
-} from './state/bookState';
-import { ALL_CHAPTERS, type Chapter } from './content/bookData';
 import { BookReader } from './components/BookReader';
-import { TextbookStage } from './scene/TextbookStage';
+import {
+  PRESET_PROMPTS,
+  TEXTBOOK_CHAPTERS,
+  type SceneBeatId,
+} from './content/bookData';
 import { TransformerEngineClient } from './engine/client';
-import type { ModelTrace } from './engine/types';
-import { formatToken } from './utils/math';
+import type {
+  ActiveLayerTrace,
+  EngineInitResult,
+  EngineTraceResult,
+} from './engine/types';
+import { TextbookStage } from './scene/TextbookStage';
+import {
+  clampInt,
+  hasActiveAblation,
+  isHeadDisabled,
+  stateFromUrl,
+  stateToSearch,
+  toggleHeadDisabled,
+  type BookState,
+} from './state/bookState';
+import {
+  computeDotProductBreakdown,
+  formatNum,
+  formatToken,
+  formatTokenExplicit,
+} from './utils/math';
 
 export function App() {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<TextbookStage | null>(null);
+  const clientRef = useRef<TransformerEngineClient | null>(null);
+
   const [state, setState] = useState<BookState>(() =>
     stateFromUrl(window.location.search)
   );
+  const [draftPrompt, setDraftPrompt] = useState<string>(state.prompt);
+  const [showContents, setShowContents] = useState<boolean>(false);
+  const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [trace, setTrace] = useState<EngineTraceResult | null>(null);
+  const [inferring, setInferring] = useState<boolean>(false);
+  const [inferError, setInferError] = useState<string | null>(null);
 
-  const [inputVal, setInputVal] = useState<string>(state.prompt);
-  const [activeTrace, setActiveTrace] = useState<ModelTrace | null>(null);
-  const [engineReady, setEngineReady] = useState<boolean>(false);
-  const [isInferring, setIsInferring] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Sync state to URL without reloading
+  useEffect(() => {
+    const search = stateToSearch(state);
+    const target = `${window.location.pathname}${search}${window.location.hash}`;
+    window.history.replaceState(null, '', target);
+  }, [state]);
 
-  const clientRef = useRef<TransformerEngineClient | null>(null);
-  const stageRef = useRef<TextbookStage | null>(null);
-  const stageContainerRef = useRef<HTMLDivElement | null>(null);
+  // Keep draftPrompt aligned when state.prompt changes externally
+  useEffect(() => {
+    setDraftPrompt(state.prompt);
+  }, [state.prompt]);
 
-  // Initialize Web Worker Client & Load Weights
+  // Initialize Web Worker engine
   useEffect(() => {
     let unmounted = false;
     const client = new TransformerEngineClient();
     clientRef.current = client;
 
-    const base = import.meta.env.BASE_URL.replace(/\/$/, '');
-    const weightsUrl = `${base}/model/weights.fp16.bin`;
-    const manifestUrl = `${base}/model/manifest.json`;
-    const tokenizerUrl = `${base}/model/tokenizer.json`;
-
-    async function load() {
-      try {
-        await client.loadModel(weightsUrl, manifestUrl, tokenizerUrl);
+    client
+      .init()
+      .then((info) => {
+        if (!unmounted) setInitInfo(info);
+      })
+      .catch((err) => {
         if (!unmounted) {
-          setEngineReady(true);
+          setInitError(err instanceof Error ? err.message : String(err));
         }
-      } catch (err: unknown) {
-        if (!unmounted) {
-          setErrorMessage(
-            err instanceof Error ? err.message : 'Failed to load model weights'
-          );
-        }
-      }
-    }
-
-    load();
+      });
 
     return () => {
       unmounted = true;
-      client.terminate();
+      client.destroy();
+      clientRef.current = null;
     };
   }, []);
 
-  // Sync state to URL hash/query
+  // Run forward pass whenever prompt or ablation changes
   useEffect(() => {
-    const url = stateToUrl(state);
-    window.history.replaceState(null, '', url);
-  }, [state]);
-
-  // Run Inference when prompt, layer, or ablation changes
-  useEffect(() => {
-    if (!engineReady || !clientRef.current) return;
+    const client = clientRef.current;
+    if (!client || !initInfo) return;
 
     let cancelled = false;
-    setIsInferring(true);
-    setErrorMessage(null);
+    setInferring(true);
+    setInferError(null);
 
-    clientRef.current
-      .run(state.prompt, {
+    client
+      .runTrace(state.prompt, {
         ablation: state.ablation,
         temperature: 0.0,
       })
-      .then((trace) => {
+      .then((res) => {
         if (!cancelled) {
-          setActiveTrace(trace);
-          setIsInferring(false);
+          setTrace(res);
+          setInferring(false);
         }
       })
-      .catch((err: unknown) => {
+      .catch((err) => {
         if (!cancelled) {
-          setIsInferring(false);
-          setErrorMessage(
-            err instanceof Error ? err.message : 'Inference failed'
-          );
+          setInferError(err instanceof Error ? err.message : String(err));
+          setInferring(false);
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [engineReady, state.prompt, state.ablation]);
+  }, [initInfo, state.prompt, state.ablation]);
 
   // Initialize Three.js Stage
   useEffect(() => {
-    if (!stageContainerRef.current) return;
-    const stage = new TextbookStage(stageContainerRef.current);
+    const container = mountRef.current;
+    if (!container) return;
+
+    const stage = new TextbookStage(container);
     stageRef.current = stage;
 
     stage.setSelectTokenCallback((qIdx, kIdx) => {
@@ -117,44 +128,44 @@ export function App() {
       }));
     });
 
-    const handleResize = () => {
-      if (!stageContainerRef.current) return;
-      stage.resize(
-        stageContainerRef.current.clientWidth,
-        stageContainerRef.current.clientHeight
-      );
-    };
-
-    window.addEventListener('resize', handleResize);
+    const ro = new ResizeObserver(() => {
+      if (container) {
+        stage.resize(container.clientWidth, container.clientHeight);
+      }
+    });
+    ro.observe(container);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      ro.disconnect();
       stage.destroy();
       stageRef.current = null;
     };
   }, []);
 
-  // Update Three.js Stage Content
-  const activeChapter: Chapter = useMemo(
-    () => ALL_CHAPTERS.find((c) => c.id === state.chapterId) ?? ALL_CHAPTERS[3],
+  // Active Chapter & Beat resolution
+  const currentChapter = useMemo(
+    () =>
+      TEXTBOOK_CHAPTERS.find((c) => c.id === state.chapterId) ??
+      TEXTBOOK_CHAPTERS[3],
     [state.chapterId]
   );
 
-  const activeBeat = useMemo(
-    () => activeChapter.beats[state.beatIndex] ?? activeChapter.beats[0],
-    [activeChapter, state.beatIndex]
+  const currentBeat = useMemo(
+    () => currentChapter.beats[state.beatIndex] ?? currentChapter.beats[0],
+    [currentChapter, state.beatIndex]
   );
 
-  const activeSceneBeat = activeBeat?.stageFocus ?? 'attn-1-qkv-projection';
+  const activeBeatId: SceneBeatId = currentBeat?.sceneBeat ?? 'attn-1-problem';
 
+  // Push updates to Three.js stage
   useEffect(() => {
     if (!stageRef.current) return;
     stageRef.current.update({
       state,
-      trace: activeTrace,
-      activeSceneBeat,
+      trace,
+      activeBeatId,
     });
-  }, [state, activeTrace, activeSceneBeat]);
+  }, [state, trace, activeBeatId]);
 
   // Keyboard navigation: Left/Right arrow moves between beats
   useEffect(() => {
@@ -168,8 +179,9 @@ export function App() {
 
       if (e.key === 'ArrowRight') {
         setState((prev) => {
-          const ch = ALL_CHAPTERS.find((c) => c.id === prev.chapterId);
-          if (!ch) return prev;
+          const ch =
+            TEXTBOOK_CHAPTERS.find((c) => c.id === prev.chapterId) ??
+            TEXTBOOK_CHAPTERS[3];
           if (prev.beatIndex < ch.beats.length - 1) {
             return { ...prev, beatIndex: prev.beatIndex + 1 };
           }
@@ -191,43 +203,48 @@ export function App() {
 
   const handlePromptSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputVal.trim()) return;
+    if (!draftPrompt.trim()) return;
     setState((prev) => ({
       ...prev,
-      prompt: inputVal.trim(),
+      prompt: draftPrompt.trim(),
       queryIdx: null,
       keyIdx: null,
     }));
   };
 
-  const handleResetPrompt = () => {
-    setInputVal(DEFAULT_PROMPT);
+  const handleSelectChapter = (id: number) => {
     setState((prev) => ({
       ...prev,
-      prompt: DEFAULT_PROMPT,
+      chapterId: id,
+      beatIndex: 0,
       queryIdx: null,
       keyIdx: null,
     }));
+    setShowContents(false);
   };
 
-  const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
-
-  const resolvedQueryIdx = Math.max(
+  const tokens = trace?.tokens ?? [];
+  const numTokens = tokens.length;
+  const resolvedQ = Math.max(
     0,
-    Math.min(
-      (activeTrace?.tokens.length ?? 1) - 1,
-      state.queryIdx ?? (activeTrace?.tokens.length ?? 1) - 1
-    )
+    Math.min(numTokens - 1, state.queryIdx ?? numTokens - 1)
+  );
+  const resolvedK = Math.max(
+    0,
+    Math.min(numTokens - 1, state.keyIdx ?? resolvedQ)
   );
 
-  const resolvedKeyIdx = Math.max(
-    0,
-    Math.min((activeTrace?.tokens.length ?? 1) - 1, state.keyIdx ?? resolvedQueryIdx)
-  );
+  const currentLayerTrace: ActiveLayerTrace | undefined =
+    trace?.layers[state.layer];
+  const qVec = currentLayerTrace?.attn.q[state.head][resolvedQ] ?? [];
+  const kVec = currentLayerTrace?.attn.k[state.head][resolvedK] ?? [];
+  const breakdown = computeDotProductBreakdown(qVec, kVec);
+
+  const headAblated = isHeadDisabled(state.ablation, state.layer, state.head);
 
   return (
     <div className="app-root">
-      {/* Top Header Bar */}
+      {/* Top Navigation */}
       <header className="top-nav">
         <div className="brand-section">
           <span className="brand-title">LLM Atlas</span>
@@ -238,26 +255,18 @@ export function App() {
           <input
             type="text"
             className="prompt-input mono"
-            value={inputVal}
-            onChange={(e) => setInputVal(e.target.value)}
+            value={draftPrompt}
+            onChange={(e) => setDraftPrompt(e.target.value)}
             placeholder="Type any prompt..."
+            aria-label="Input prompt"
           />
           <button
             type="submit"
             className="btn-run"
-            disabled={!engineReady || isInferring}
+            disabled={!initInfo || inferring}
           >
-            {isInferring ? 'Thinking...' : 'Run'}
+            {inferring ? 'Computing...' : 'Run'}
           </button>
-          {inputVal !== DEFAULT_PROMPT && (
-            <button
-              type="button"
-              className="btn-mode"
-              onClick={handleResetPrompt}
-            >
-              Reset Prompt
-            </button>
-          )}
         </form>
 
         <div className="top-actions">
@@ -265,10 +274,21 @@ export function App() {
             type="button"
             className={`btn-mode ${state.lectureMode ? 'is-active' : ''}`}
             onClick={() =>
-              setState((prev) => ({ ...prev, lectureMode: !prev.lectureMode }))
+              setState((prev) => ({
+                ...prev,
+                lectureMode: !prev.lectureMode,
+              }))
             }
           >
-            {state.lectureMode ? 'Exit Lecture Mode' : 'Lecture Mode'}
+            {state.lectureMode ? 'Exit Lecture' : 'Lecture Mode'}
+          </button>
+
+          <button
+            type="button"
+            className="btn-mode"
+            onClick={() => setShowContents(true)}
+          >
+            Contents
           </button>
 
           <a
@@ -282,24 +302,76 @@ export function App() {
         </div>
       </header>
 
+      {/* Table of Contents Modal */}
+      {showContents && (
+        <div className="modal-overlay" onClick={() => setShowContents(false)}>
+          <div
+            className="contents-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <header className="modal-header">
+              <h2 className="modal-title">Table of Contents</h2>
+              <button
+                type="button"
+                className="btn-close-modal"
+                onClick={() => setShowContents(false)}
+              >
+                ✕
+              </button>
+            </header>
+            <div className="modal-list">
+              {TEXTBOOK_CHAPTERS.map((ch) => {
+                const isActive = ch.id === state.chapterId;
+                const isReady = ch.status === 'published';
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    disabled={!isReady}
+                    className={`chapter-card-btn ${isActive ? 'is-active' : ''}`}
+                    onClick={() => handleSelectChapter(ch.id)}
+                  >
+                    <div className="chapter-card-header">
+                      <span className="chapter-num">Chapter {ch.id}</span>
+                      <span
+                        className={`chapter-status ${
+                          isReady ? 'is-ready' : 'is-soon'
+                        }`}
+                      >
+                        {isReady ? 'Available Now' : 'Coming Soon'}
+                      </span>
+                    </div>
+                    <div className="chapter-card-title">{ch.title}</div>
+                    <div className="chapter-card-teaser">{ch.teaser}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Workspace */}
-      <div className={`main-workspace ${state.lectureMode ? 'is-lecture' : ''}`}>
+      <div
+        className={`main-workspace ${state.lectureMode ? 'is-lecture' : ''}`}
+      >
         {/* Left Pane: Book Reader */}
         {!state.lectureMode && (
-          <aside className="reader-pane">
-            <BookReader
-              state={state}
-              trace={activeTrace}
-              onUpdateState={setState}
-            />
-          </aside>
+          <BookReader
+            state={state}
+            trace={trace}
+            onUpdateState={setState}
+            onOpenContents={() => setShowContents(true)}
+          />
         )}
 
-        {/* Right Pane: 3D Textbook Stage */}
+        {/* Right Pane: 3D Stage */}
         <section className="stage-pane" aria-label="3D Interactive Stage">
-          <div ref={stageContainerRef} className="three-stage-canvas-container" />
+          <div ref={mountRef} className="three-stage-canvas-container" />
 
-          {/* Stage HUD Top */}
+          {/* Top Stage Controls Overlay */}
           <div className="stage-hud-top">
             <div className="hud-group">
               <span className="hud-label">Layer</span>
@@ -331,7 +403,7 @@ export function App() {
                 );
               })}
 
-              {activeSceneBeat === 'attn-4-mask-softmax' && (
+              {activeBeatId === 'attn-4-mask-softmax' && (
                 <button
                   type="button"
                   className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
@@ -342,15 +414,17 @@ export function App() {
                     }))
                   }
                 >
-                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}
+                  {state.showPreSoftmax
+                    ? 'Showing: Raw Scores'
+                    : 'Showing: Softmax %'}
                 </button>
               )}
 
-              {(activeSceneBeat === 'attn-5-value-mixer' ||
-                activeSceneBeat === 'attn-6-multihead-full') && (
+              {(activeBeatId === 'attn-5-value-mixer' ||
+                activeBeatId === 'attn-6-multihead-full') && (
                 <button
                   type="button"
-                  className={`mini-btn ${headOff ? 'is-warm' : ''}`}
+                  className={`mini-btn ${headAblated ? 'is-warm' : ''}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -362,7 +436,9 @@ export function App() {
                     }))
                   }
                 >
-                  {headOff ? `Re-enable H${state.head}` : `Disable H${state.head}`}
+                  {headAblated
+                    ? `Re-enable H${state.head}`
+                    : `Disable H${state.head}`}
                 </button>
               )}
             </div>
@@ -387,22 +463,21 @@ export function App() {
             </div>
           </div>
 
-          {activeTrace && (
+          {/* Bottom Stage Token Selector */}
+          {trace && numTokens > 0 && (
             <div className="stage-hud-bottom">
               <div className="token-bar" aria-label="Select Query or Key token">
                 <span className="hud-label">
-                  {activeSceneBeat === 'attn-2-dot-product'
+                  {activeBeatId === 'attn-2-dot-product'
                     ? 'Compare Key:'
                     : 'Query Token:'}
                 </span>
-                {activeTrace.tokens.map((tok, idx) => {
-                  const isQ = idx === resolvedQueryIdx;
+                {tokens.map((tok, idx) => {
+                  const isQ = idx === resolvedQ;
                   const isK =
-                    activeSceneBeat === 'attn-2-dot-product' &&
-                    idx === resolvedKeyIdx;
+                    activeBeatId === 'attn-2-dot-product' && idx === resolvedK;
                   const disabledKey =
-                    activeSceneBeat === 'attn-2-dot-product' &&
-                    idx > resolvedQueryIdx;
+                    activeBeatId === 'attn-2-dot-product' && idx > resolvedQ;
                   return (
                     <button
                       key={`${tok.start}-${idx}`}
@@ -413,7 +488,7 @@ export function App() {
                       }`}
                       onClick={() =>
                         setState((prev) =>
-                          activeSceneBeat === 'attn-2-dot-product'
+                          activeBeatId === 'attn-2-dot-product'
                             ? { ...prev, keyIdx: idx }
                             : { ...prev, queryIdx: idx, keyIdx: null }
                         )
@@ -425,7 +500,8 @@ export function App() {
                 })}
               </div>
               <div className="camera-hint">
-                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
+                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to
+                zoom · Left/Right keys step beats
               </div>
             </div>
           )}

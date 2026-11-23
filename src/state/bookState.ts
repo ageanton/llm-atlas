@@ -117,7 +117,7 @@ export function stateFromUrl(search: string): BookState {
       ? clampInt(Number(keyIdxRaw), 0, 63)
       : null;
   const showPreSoftmax = params.get('presoft') === '1';
-  const lectureMode = params.get('lecture') === '1';
+  const lectureMode = params.get('mode') === 'lecture';
   const ablation = paramToAblation(params.get('abl'));
 
   return {
@@ -135,7 +135,7 @@ export function stateFromUrl(search: string): BookState {
   };
 }
 
-export function stateToUrl(state: BookState): string {
+export function stateToSearch(state: BookState): string {
   const params = new URLSearchParams();
   if (state.prompt !== DEFAULT_PROMPT) params.set('in', state.prompt);
   params.set('ch', String(state.chapterId));
@@ -146,11 +146,9 @@ export function stateToUrl(state: BookState): string {
   if (state.queryIdx !== null) params.set('q', String(state.queryIdx));
   if (state.keyIdx !== null) params.set('k', String(state.keyIdx));
   if (state.showPreSoftmax) params.set('presoft', '1');
-  if (state.lectureMode) params.set('lecture', '1');
-
-  const ablStr = ablationToParam(state.ablation);
-  if (ablStr !== 'none') params.set('abl', ablStr);
-
-  const query = params.toString();
-  return query ? `?${query}` : window.location.pathname;
+  if (hasActiveAblation(state.ablation)) {
+    params.set('abl', ablationToParam(state.ablation));
+  }
+  if (state.lectureMode) params.set('mode', 'lecture');
+  return `?${params.toString()}`;
 }

@@ -1,18 +1,15 @@
 import * as THREE from 'three';
 
-export function formatToken(tok: string): string {
-  return tok
-    .replace(/\n/g, '\\n')
-    .replace(/\t/g, '\\t')
-    .replace(/ /g, '·');
-}
-
 export function sequentialColor(tRaw: number): string {
   const t = Math.max(0, Math.min(1, tRaw));
-  const r = Math.round(245 - 200 * t);
-  const g = Math.round(247 - 140 * t);
-  const b = Math.round(250 - 40 * t);
-  return `rgb(${r}, ${g}, ${b})`;
+  const stops: [number, [number, number, number]][] = [
+    [0.0, [254, 250, 243]],
+    [0.2, [253, 230, 138]],
+    [0.45, [245, 158, 11]],
+    [0.75, [217, 70, 239]],
+    [1.0, [67, 24, 255]],
+  ];
+  return interpolateStops(t, stops);
 }
 
 export function divergingColor(val: number, maxAbs: number): string {
@@ -33,30 +30,76 @@ export function divergingColor(val: number, maxAbs: number): string {
 }
 
 export function threeSequentialColor(tRaw: number): THREE.Color {
-  const t = Math.max(0, Math.min(1, tRaw));
-  const r = (245 - 200 * t) / 255;
-  const g = (247 - 140 * t) / 255;
-  const b = (250 - 40 * t) / 255;
-  return new THREE.Color(r, g, b);
+  const css = sequentialColor(tRaw);
+  return new THREE.Color(css);
 }
 
 export function threeDivergingColor(val: number, maxAbs: number): THREE.Color {
-  if (maxAbs <= 1e-9) return new THREE.Color(0xf0f3f6);
-  const t = Math.max(-1, Math.min(1, val / maxAbs));
-  if (t < 0) {
-    const k = -t;
-    return new THREE.Color(
-      (247 - 40 * k) / 255,
-      (248 - 140 * k) / 255,
-      (250 - 200 * k) / 255
-    );
+  const css = divergingColor(val, maxAbs);
+  return new THREE.Color(css);
+}
+
+function interpolateStops(
+  t: number,
+  stops: [number, [number, number, number]][]
+): string {
+  if (t <= stops[0][0]) {
+    const c = stops[0][1];
+    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
   }
-  const k = t;
-  return new THREE.Color(
-    (247 + 0 * k) / 255,
-    (248 - 150 * k) / 255,
-    (250 - 150 * k) / 255
-  );
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [p0, c0] = stops[i];
+    const [p1, c1] = stops[i + 1];
+    if (t >= p0 && t <= p1) {
+      const u = (t - p0) / Math.max(1e-6, p1 - p0);
+      const r = Math.round(c0[0] + u * (c1[0] - c0[0]));
+      const g = Math.round(c0[1] + u * (c1[1] - c0[1]));
+      const b = Math.round(c0[2] + u * (c1[2] - c0[2]));
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+  }
+  const last = stops[stops.length - 1][1];
+  return `rgb(${last[0]}, ${last[1]}, ${last[2]})`;
+}
+
+export function formatToken(tok: string): string {
+  return tok
+    .replace(/\n/g, '↵')
+    .replace(/\t/g, '⇥')
+    .replace(/ /g, '·');
+}
+
+export function formatTokenExplicit(tok: string): string {
+  if (tok === ' ') return '␣ (space)';
+  if (tok === '\n') return '↵ (newline)';
+  if (tok.startsWith(' ')) return `·${tok.slice(1)}`;
+  return tok;
+}
+
+export function formatNum(n: number | null | undefined, digits = 3): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  if (Math.abs(n) < 1e-4 && n !== 0) return n.toExponential(2);
+  return n.toFixed(digits);
+}
+
+export function computeDotProductBreakdown(
+  q: number[],
+  k: number[]
+): {
+  products: number[];
+  sum: number;
+  scaled: number;
+} {
+  const d = Math.min(q.length, k.length);
+  const products: number[] = new Array(d);
+  let sum = 0;
+  for (let i = 0; i < d; i++) {
+    const p = (q[i] ?? 0) * (k[i] ?? 0);
+    products[i] = p;
+    sum += p;
+  }
+  const scaled = sum / Math.sqrt(d || 1);
+  return { products, sum, scaled };
 }
 
 export function makeTextSprite(
@@ -77,8 +120,8 @@ export function makeTextSprite(
     options?.fontFamily ??
     'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
   const fontColor = options?.fontColor ?? '#1a2233';
-  const bgColor = options?.bgColor ?? 'rgba(255, 255, 255, 0.92)';
-  const borderColor = options?.borderColor ?? 'rgba(209, 217, 226, 0.8)';
+  const bgColor = options?.bgColor ?? 'rgba(255, 255, 255, 0.94)';
+  const borderColor = options?.borderColor ?? 'rgba(209, 217, 226, 0.9)';
   const borderWidth = options?.borderWidth ?? 2;
   const padding = options?.padding ?? 14;
   const scale = options?.scale ?? 1.0;
@@ -112,7 +155,7 @@ export function makeTextSprite(
     ctx.arcTo(x + w, y, x + w, y + h, r);
     ctx.arcTo(x + w, y + h, x, y + h, r);
     ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
+    ctx.arcTo(x, y + x, x, y, r);
     ctx.closePath();
     ctx.fill();
 
@@ -144,97 +187,55 @@ export function makeTextSprite(
   return sprite;
 }
 
-export function drawAttentionHeatmap(
-  canvas: HTMLCanvasElement,
-  scores: number[][],
+export function makeMatrixCanvasTexture(
+  matrix: number[][],
   options?: {
-    labels?: string[];
-    queryHighlight?: number | null;
-    keyHighlight?: number | null;
     isPreSoftmax?: boolean;
     cellSize?: number;
+    maxAbs?: number;
   }
-): void {
+): THREE.CanvasTexture {
+  const rows = matrix.length;
+  const cols = matrix[0]?.length ?? 0;
+  const cellSize = options?.cellSize ?? 16;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, cols * cellSize);
+  canvas.height = Math.max(1, rows * cellSize);
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return new THREE.CanvasTexture(canvas);
 
-  const N = scores.length;
-  if (N === 0) return;
-
-  const cellSize = options?.cellSize ?? 22;
-  const marginL = 50;
-  const marginT = 50;
-  const marginR = 16;
-  const marginB = 16;
-
-  const w = marginL + N * cellSize + marginR;
-  const h = marginT + N * cellSize + marginB;
-
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, w, h);
-
-  let maxAbs = 1e-6;
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j <= i; j++) {
-      const v = scores[i][j];
-      if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+  let maxAbs = options?.maxAbs ?? 1e-6;
+  if (!options?.maxAbs && options?.isPreSoftmax) {
+    for (let i = 0; i < rows; i++) {
+      for (let j = 0; j < cols; j++) {
+        const v = matrix[i][j];
+        if (Number.isFinite(v) && Math.abs(v) > maxAbs) {
+          maxAbs = Math.abs(v);
+        }
+      }
     }
   }
 
-  ctx.font = '11px ui-monospace, monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const v = matrix[i][j];
+      const x = j * cellSize;
+      const y = i * cellSize;
 
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j < N; j++) {
-      const x = marginL + j * cellSize;
-      const y = marginT + i * cellSize;
-
-      if (j > i) {
-        ctx.fillStyle = '#f0f3f6';
-        ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
-        ctx.fillStyle = '#c5d0dc';
-        ctx.fillText('—', x + cellSize / 2, y + cellSize / 2);
+      if (!Number.isFinite(v) || v <= -9000) {
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(x, y, cellSize, cellSize);
         continue;
       }
 
-      const val = scores[i][j];
       ctx.fillStyle = options?.isPreSoftmax
-        ? divergingColor(val, maxAbs)
-        : sequentialColor(val);
-      ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
-
-      if (
-        (options?.queryHighlight === i && options?.keyHighlight === j) ||
-        options?.queryHighlight === i
-      ) {
-        ctx.strokeStyle = '#1d4ed8';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x + 0.5, y + 0.5, cellSize - 2, cellSize - 2);
-      }
+        ? divergingColor(v, maxAbs)
+        : sequentialColor(v);
+      ctx.fillRect(x, y, cellSize, cellSize);
     }
   }
 
-  ctx.fillStyle = '#334155';
-  ctx.font = '10px ui-monospace, monospace';
-  const labels = options?.labels ?? [];
-  for (let k = 0; k < N; k++) {
-    const raw = labels[k] ?? `${k}`;
-    const clean = formatToken(raw).slice(0, 4);
-
-    ctx.save();
-    ctx.translate(marginL + k * cellSize + cellSize / 2, marginT - 10);
-    ctx.rotate(-Math.PI / 4);
-    ctx.textAlign = 'left';
-    ctx.fillText(clean, 0, 0);
-    ctx.restore();
-
-    ctx.textAlign = 'right';
-    ctx.fillText(clean, marginL - 6, marginT + k * cellSize + cellSize / 2);
-  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }

@@ -1,10 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import type { ModelTrace } from '../engine/types';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import type { SceneBeatId } from '../content/bookData';
+import type { ActiveLayerTrace, EngineTraceResult } from '../engine/types';
 import type { BookState } from '../state/bookState';
 import {
+  computeDotProductBreakdown,
   divergingColor,
+  formatNum,
   formatToken,
   makeTextSprite,
   sequentialColor,
@@ -14,8 +18,8 @@ import {
 
 export interface StageRenderData {
   state: BookState;
-  trace: ModelTrace | null;
-  activeSceneBeat: string;
+  trace: EngineTraceResult | null;
+  activeBeatId: SceneBeatId;
 }
 
 export class TextbookStage {
@@ -39,16 +43,16 @@ export class TextbookStage {
     const height = Math.max(10, container.clientHeight);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xfbfcfe);
+    this.scene.background = new THREE.Color(0xf6f8fb);
 
-    this.camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 1000);
-    this.camera.position.set(0, 18, 38);
+    this.camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 1000);
+    this.camera.position.set(0, 16, 32);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -86,13 +90,13 @@ export class TextbookStage {
     this.scene.add(hemi);
 
     const sun = new THREE.DirectionalLight(0xfffaed, 1.25);
-    sun.position.set(22, 40, 26);
+    sun.position.set(20, 36, 24);
     sun.castShadow = true;
     sun.shadow.mapSize.width = 2048;
     sun.shadow.mapSize.height = 2048;
     sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 120;
-    const d = 30;
+    sun.shadow.camera.far = 100;
+    const d = 26;
     sun.shadow.camera.left = -d;
     sun.shadow.camera.right = d;
     sun.shadow.camera.top = d;
@@ -101,14 +105,14 @@ export class TextbookStage {
     this.scene.add(sun);
 
     const fill = new THREE.DirectionalLight(0xe0f2fe, 0.45);
-    fill.position.set(-20, 16, -18);
+    fill.position.set(-18, 14, -16);
     this.scene.add(fill);
   }
 
   private setupGround() {
     const groundGeo = new THREE.PlaneGeometry(160, 160);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xf5f7fa,
+      color: 0xf0f3f8,
       roughness: 0.95,
       metalness: 0.02,
     });
@@ -118,7 +122,7 @@ export class TextbookStage {
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(100, 50, 0xd1d9e2, 0xeef2f6);
+    const grid = new THREE.GridHelper(100, 50, 0xd8e0ea, 0xeef3f8);
     grid.position.y = 0;
     this.scene.add(grid);
   }
@@ -131,7 +135,7 @@ export class TextbookStage {
   }
 
   public resetCamera() {
-    this.camera.position.set(0, 18, 38);
+    this.camera.position.set(0, 16, 32);
     this.controls.target.set(0, 0, 0);
     this.controls.update();
   }
@@ -163,7 +167,7 @@ export class TextbookStage {
     this.clearGroup(this.contentGroup);
     if (!this.currentData || !this.currentData.trace) return;
 
-    const { state, trace, activeSceneBeat } = this.currentData;
+    const { state, trace, activeBeatId } = this.currentData;
     const numTokens = trace.tokens.length;
     const resolvedQ = Math.max(
       0,
@@ -174,14 +178,14 @@ export class TextbookStage {
       Math.min(numTokens - 1, state.keyIdx ?? resolvedQ)
     );
 
-    switch (activeSceneBeat) {
-      case 'attn-1-qkv-projection':
+    switch (activeBeatId) {
+      case 'attn-1-problem':
         this.buildBeat1QKV(trace, state, resolvedQ);
         break;
       case 'attn-2-dot-product':
         this.buildBeat2DotProduct(trace, state, resolvedQ, resolvedK);
         break;
-      case 'attn-3-scale-by-root-d':
+      case 'attn-3-scan-row':
         this.buildBeat3Scale(trace, state, resolvedQ);
         break;
       case 'attn-4-mask-softmax':
@@ -201,49 +205,74 @@ export class TextbookStage {
 
   // --- BEAT 1: QKV Projection ---
   private buildBeat1QKV(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
-    queryIdx: number
+    qIdx: number
   ) {
-    const numTokens = trace.tokens.length;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
+
+    const tok = trace.tokens[qIdx];
+    const tokLabel = formatToken(tok.text);
     const head = state.head;
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
 
-    const qHead = blk.attn.q[head][queryIdx] ?? [];
-    const kHead = blk.attn.k[head][queryIdx] ?? [];
-    const vHead = blk.attn.v[head][queryIdx] ?? [];
+    const qHead = layer.attn.q[head][qIdx] ?? [];
+    const kHead = layer.attn.k[head][qIdx] ?? [];
+    const vHead = layer.attn.v[head][qIdx] ?? [];
 
-    const labelTok = makeTextSprite(
-      `Selected Token [${queryIdx}]: "${formatToken(
-        trace.tokens[queryIdx].text
-      )}" · Block ${state.layer} · Head ${head}`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+    const banner = makeTextSprite(
+      `Token [${qIdx}] "${tokLabel}" Projections · Block ${state.layer} · Head ${head}`,
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
-    labelTok.position.set(0, 10, 0);
-    this.contentGroup.add(labelTok);
+    banner.position.set(0, 9.5, 0);
+    this.contentGroup.add(banner);
 
     const roles = [
-      { name: 'Query (Q)', vec: qHead, colorHex: 0x2563eb, xOff: -11 },
-      { name: 'Key (K)', vec: kHead, colorHex: 0x059669, xOff: 0 },
-      { name: 'Value (V)', vec: vHead, colorHex: 0xd97706, xOff: 11 },
+      {
+        name: 'Query (Q)',
+        vec: qHead,
+        colorHex: 0x2563eb,
+        xOff: -10,
+        sub: 'What I seek',
+      },
+      {
+        name: 'Key (K)',
+        vec: kHead,
+        colorHex: 0x059669,
+        xOff: 0,
+        sub: 'What I advertise',
+      },
+      {
+        name: 'Value (V)',
+        vec: vHead,
+        colorHex: 0xd97706,
+        xOff: 10,
+        sub: 'Content to deliver',
+      },
     ];
 
-    roles.forEach((role) => {
-      const header = makeTextSprite(`${role.name} [d=16]`, {
+    roles.forEach((r) => {
+      const header = makeTextSprite(`${r.name} [d=16]`, {
         fontSize: 20,
         bgColor: '#ffffff',
         fontColor: '#0f172a',
       });
-      header.position.set(role.xOff, 7.5, 0);
+      header.position.set(r.xOff, 7.5, 0);
       this.contentGroup.add(header);
 
-      const dHead = 16;
-      for (let c = 0; c < dHead; c++) {
-        const val = role.vec[c] ?? 0;
+      const subSprite = makeTextSprite(r.sub, {
+        fontSize: 14,
+        bgColor: '#f1f5f9',
+        fontColor: '#475569',
+      });
+      subSprite.position.set(r.xOff, 6.2, 0);
+      this.contentGroup.add(subSprite);
+
+      for (let c = 0; c < 16; c++) {
+        const val = r.vec[c] ?? 0;
         const barH = Math.max(0.12, Math.abs(val) * 1.8);
-        const geo = new THREE.BoxGeometry(0.8, barH, 0.8);
-        const col = val >= 0 ? role.colorHex : 0xf43f5e;
+        const geo = new RoundedBoxGeometry(0.75, barH, 0.75, 2, 0.08);
+        const col = val >= 0 ? r.colorHex : 0xf43f5e;
         const mat = new THREE.MeshStandardMaterial({
           color: col,
           roughness: 0.25,
@@ -253,81 +282,75 @@ export class TextbookStage {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.position.set(
-          role.xOff - 3.5 + (c % 4) * 2.3,
+          r.xOff - 3.2 + (c % 4) * 2.1,
           barH / 2,
-          -3 + Math.floor(c / 4) * 2.2
+          -2.5 + Math.floor(c / 4) * 2.0
         );
         this.contentGroup.add(mesh);
       }
     });
+
+    const residualTag = makeTextSprite('Residual Input (64-d vector)', {
+      fontSize: 16,
+      bgColor: '#e2e8f0',
+      fontColor: '#1e293b',
+    });
+    residualTag.position.set(0, 0.5, 6);
+    this.contentGroup.add(residualTag);
   }
 
   // --- BEAT 2: Dot Product ---
   private buildBeat2DotProduct(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
     qIdx: number,
     kIdx: number
   ) {
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
 
-    const qVec = blk.attn.q[state.head][qIdx] ?? [];
-    const kVec = blk.attn.k[state.head][kIdx] ?? [];
-    const rawDot = blk.attn.preSoftmax[state.head][qIdx]?.[kIdx] ?? 0;
+    const qVec = layer.attn.q[state.head][qIdx] ?? [];
+    const kVec = layer.attn.k[state.head][kIdx] ?? [];
+    const breakdown = computeDotProductBreakdown(qVec, kVec);
 
     const tokQ = formatToken(trace.tokens[qIdx].text);
     const tokK = formatToken(trace.tokens[kIdx].text);
 
     const banner = makeTextSprite(
-      `Dot Product: Q("${tokQ}") · K("${tokK}") = ${rawDot.toFixed(3)}`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+      `Dot Product: Q("${tokQ}") · K("${tokK}") = ${formatNum(breakdown.sum)}`,
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
-    banner.position.set(0, 11, 0);
+    banner.position.set(0, 10.5, 0);
     this.contentGroup.add(banner);
 
-    let runningSum = 0;
     for (let c = 0; c < 16; c++) {
       const qVal = qVec[c] ?? 0;
       const kVal = kVec[c] ?? 0;
-      const prod = qVal * kVal;
-      runningSum += prod;
+      const prod = breakdown.products[c] ?? 0;
 
-      const x = -13 + c * 1.75;
+      const x = -12.5 + c * 1.65;
 
+      const qH = Math.max(0.08, Math.abs(qVal) * 1.5);
       const qBar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.5, Math.max(0.08, Math.abs(qVal) * 1.5), 0.5),
-        new THREE.MeshStandardMaterial({
-          color: 0x2563eb,
-          roughness: 0.3,
-        })
+        new RoundedBoxGeometry(0.5, qH, 0.5, 2, 0.05),
+        new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.3 })
       );
-      qBar.position.set(
-        x,
-        Math.max(0.08, Math.abs(qVal) * 1.5) / 2,
-        3.5
-      );
+      qBar.position.set(x, qH / 2, 3.5);
       qBar.castShadow = true;
       this.contentGroup.add(qBar);
 
+      const kH = Math.max(0.08, Math.abs(kVal) * 1.5);
       const kBar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.5, Math.max(0.08, Math.abs(kVal) * 1.5), 0.5),
-        new THREE.MeshStandardMaterial({
-          color: 0x059669,
-          roughness: 0.3,
-        })
+        new RoundedBoxGeometry(0.5, kH, 0.5, 2, 0.05),
+        new THREE.MeshStandardMaterial({ color: 0x059669, roughness: 0.3 })
       );
-      kBar.position.set(
-        x,
-        Math.max(0.08, Math.abs(kVal) * 1.5) / 2,
-        0.5
-      );
+      kBar.position.set(x, kH / 2, 0.5);
       kBar.castShadow = true;
       this.contentGroup.add(kBar);
 
       const prodH = Math.max(0.1, Math.abs(prod) * 2.2);
       const prodBar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.9, prodH, 0.9),
+        new RoundedBoxGeometry(0.85, prodH, 0.85, 2, 0.08),
         new THREE.MeshStandardMaterial({
           color: prod >= 0 ? 0x0284c7 : 0xf43f5e,
           roughness: 0.2,
@@ -365,62 +388,53 @@ export class TextbookStage {
 
   // --- BEAT 3: Scale by √d ---
   private buildBeat3Scale(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
     qIdx: number
   ) {
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
 
-    const row = blk.attn.preSoftmax[state.head][qIdx] ?? [];
+    const row = layer.attn.preSoftmax[state.head][qIdx] ?? [];
     const numTokens = trace.tokens.length;
 
     const banner = makeTextSprite(
-      `Scaling by 1 / √16 = 0.25 · Row ${qIdx} ("${formatToken(
+      `Scale Factor: 1 / √16 = 0.25 · Row ${qIdx} ("${formatToken(
         trace.tokens[qIdx].text
       )}")`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
-    banner.position.set(0, 11, 0);
+    banner.position.set(0, 10.5, 0);
     this.contentGroup.add(banner);
 
     for (let j = 0; j < numTokens; j++) {
-      const raw = row[j] ?? 0;
-      const unscaled = raw * 4.0;
+      const scaledVal = row[j] ?? 0;
+      const unscaledVal = scaledVal * 4.0;
       const x = -10 + j * 1.5;
 
       if (j > qIdx) {
         const maskedBlock = new THREE.Mesh(
-          new THREE.BoxGeometry(1.1, 0.2, 1.1),
-          new THREE.MeshStandardMaterial({
-            color: 0x94a3b8,
-            roughness: 0.9,
-          })
+          new RoundedBoxGeometry(1.0, 0.2, 1.0, 2, 0.04),
+          new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.9 })
         );
         maskedBlock.position.set(x, 0.1, 0);
         this.contentGroup.add(maskedBlock);
         continue;
       }
 
-      const unscaledH = Math.max(0.1, Math.abs(unscaled) * 0.7);
+      const unscaledH = Math.max(0.1, Math.abs(unscaledVal) * 0.65);
       const unscaledBar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.5, unscaledH, 0.5),
-        new THREE.MeshStandardMaterial({
-          color: 0xf59e0b,
-          roughness: 0.3,
-        })
+        new RoundedBoxGeometry(0.5, unscaledH, 0.5, 2, 0.05),
+        new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.3 })
       );
       unscaledBar.position.set(x - 0.35, unscaledH / 2, 2.5);
       unscaledBar.castShadow = true;
       this.contentGroup.add(unscaledBar);
 
-      const scaledH = Math.max(0.1, Math.abs(raw) * 0.7);
+      const scaledH = Math.max(0.1, Math.abs(scaledVal) * 0.65);
       const scaledBar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.5, scaledH, 0.5),
-        new THREE.MeshStandardMaterial({
-          color: 0x0284c7,
-          roughness: 0.2,
-        })
+        new RoundedBoxGeometry(0.5, scaledH, 0.5, 2, 0.05),
+        new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2 })
       );
       scaledBar.position.set(x + 0.35, scaledH / 2, -2.5);
       scaledBar.castShadow = true;
@@ -431,16 +445,16 @@ export class TextbookStage {
         bgColor: '#ffffff',
         fontColor: '#334155',
       });
-      tokLabel.position.set(x, 0.5, 5);
+      tokLabel.position.set(x, 0.4, 5);
       this.contentGroup.add(tokLabel);
     }
 
-    const legend1 = makeTextSprite('Unscaled Dot Products (Wild Variance)', {
+    const legend1 = makeTextSprite('Unscaled Dot Products (High Variance)', {
       fontSize: 16,
       bgColor: '#fef3c7',
       fontColor: '#92400e',
     });
-    legend1.position.set(-13, 3, 2.5);
+    legend1.position.set(-13, 2.5, 2.5);
     this.contentGroup.add(legend1);
 
     const legend2 = makeTextSprite('Scaled by 1/4 (Healthy Softmax Gradient)', {
@@ -448,29 +462,29 @@ export class TextbookStage {
       bgColor: '#e0f2fe',
       fontColor: '#075985',
     });
-    legend2.position.set(-13, 3, -2.5);
+    legend2.position.set(-13, 2.5, -2.5);
     this.contentGroup.add(legend2);
   }
 
   // --- BEAT 4: Causal Mask & Softmax ---
   private buildBeat4MaskSoftmax(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
     qIdx: number
   ) {
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
 
     const matrix = state.showPreSoftmax
-      ? blk.attn.preSoftmax[state.head]
-      : blk.attn.probs[state.head];
+      ? layer.attn.preSoftmax[state.head]
+      : layer.attn.probs[state.head];
     const N = trace.tokens.length;
 
     const banner = makeTextSprite(
       state.showPreSoftmax
-        ? `Pre-Softmax Logits (with -∞ Mask)`
+        ? `Pre-Softmax Logits (with -∞ Causal Mask)`
         : `Post-Softmax Attention Weights (100% per row)`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
     banner.position.set(0, 11, 0);
     this.contentGroup.add(banner);
@@ -486,7 +500,13 @@ export class TextbookStage {
 
         if (j > i) {
           const darkSlate = new THREE.Mesh(
-            new THREE.BoxGeometry(cellSize * 0.9, 0.2, cellSize * 0.9),
+            new RoundedBoxGeometry(
+              cellSize * 0.9,
+              0.2,
+              cellSize * 0.9,
+              2,
+              0.04
+            ),
             new THREE.MeshStandardMaterial({
               color: 0x334155,
               roughness: 0.9,
@@ -506,7 +526,13 @@ export class TextbookStage {
           : threeSequentialColor(val);
 
         const tile = new THREE.Mesh(
-          new THREE.BoxGeometry(cellSize * 0.9, h, cellSize * 0.9),
+          new RoundedBoxGeometry(
+            cellSize * 0.9,
+            h,
+            cellSize * 0.9,
+            2,
+            0.06
+          ),
           new THREE.MeshStandardMaterial({
             color: col,
             roughness: 0.25,
@@ -529,31 +555,30 @@ export class TextbookStage {
 
   // --- BEAT 5: Value Mixer ---
   private buildBeat5ValueMixer(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
     qIdx: number
   ) {
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
 
-    const probs = blk.attn.probs[state.head][qIdx] ?? [];
-    const vMatrix = blk.attn.v[state.head];
-    const outHead = blk.attn.out[state.head][qIdx] ?? [];
+    const probs = layer.attn.probs[state.head][qIdx] ?? [];
+    const outHead = layer.attn.out[state.head][qIdx] ?? [];
     const tokQ = formatToken(trace.tokens[qIdx].text);
 
     const banner = makeTextSprite(
       `Token "${tokQ}" Blending Value Vectors according to Attention %`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
     banner.position.set(0, 11, 0);
     this.contentGroup.add(banner);
 
     for (let j = 0; j <= qIdx; j++) {
       const weight = probs[j] ?? 0;
-      const x = -10 + j * 1.6;
+      const x = -10 + j * 1.55;
       const tokJ = formatToken(trace.tokens[j].text);
 
-      const beamH = Math.max(0.1, weight * 10);
+      const beamH = Math.max(0.1, weight * 9);
       const beam = new THREE.Mesh(
         new THREE.CylinderGeometry(0.12, 0.45, beamH, 16),
         new THREE.MeshStandardMaterial({
@@ -594,13 +619,17 @@ export class TextbookStage {
       const val = outHead[c] ?? 0;
       const barH = Math.max(0.15, Math.abs(val) * 2.0);
       const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(0.7, barH, 0.7),
+        new RoundedBoxGeometry(0.7, barH, 0.7, 2, 0.06),
         new THREE.MeshStandardMaterial({
           color: val >= 0 ? 0x0284c7 : 0xf43f5e,
           roughness: 0.25,
         })
       );
-      mesh.position.set(-7 + (c % 8) * 1.8, barH / 2, -4 - Math.floor(c / 8) * 2);
+      mesh.position.set(
+        -6.5 + (c % 8) * 1.8,
+        barH / 2,
+        -4 - Math.floor(c / 8) * 1.8
+      );
       mesh.castShadow = true;
       this.contentGroup.add(mesh);
     }
@@ -608,16 +637,16 @@ export class TextbookStage {
 
   // --- BEAT 6: 4-Head Orchestra ---
   private buildBeat6MultiHead(
-    trace: ModelTrace,
+    trace: EngineTraceResult,
     state: BookState,
     qIdx: number
   ) {
-    const blk = trace.blocks[state.layer];
-    if (!blk) return;
+    const layer = trace.layers[state.layer];
+    if (!layer) return;
 
     const banner = makeTextSprite(
       `4 Heads in Parallel · Concatenated to 64 dimensions · Multiplied by Wo`,
-      { fontSize: 24, bgColor: '#1e293b', fontColor: '#ffffff' }
+      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
     );
     banner.position.set(0, 11, 0);
     this.contentGroup.add(banner);
@@ -641,12 +670,12 @@ export class TextbookStage {
       hLabel.position.set(xOffsets[h], 7.5, 0);
       this.contentGroup.add(hLabel);
 
-      const headVec = blk.attn.out[h][qIdx] ?? [];
+      const headVec = layer.attn.out[h][qIdx] ?? [];
       for (let c = 0; c < 16; c++) {
         const val = off ? 0 : headVec[c] ?? 0;
         const barH = Math.max(0.12, Math.abs(val) * 1.8);
         const mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(0.7, barH, 0.7),
+          new RoundedBoxGeometry(0.7, barH, 0.7, 2, 0.06),
           new THREE.MeshStandardMaterial({
             color: off ? 0x94a3b8 : headColors[h],
             roughness: 0.3,
