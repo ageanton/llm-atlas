@@ -710,3 +710,24 @@ select:focus-visible {
   width: 96px;
   accent-color: var(--accent);
 }
+
+
+.sample-burst {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--border-strong);
+  font-size: 0.74rem;
+  pointer-events: auto;
+}
+
+.burst-chip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}

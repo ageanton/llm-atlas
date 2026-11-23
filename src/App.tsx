@@ -21,8 +21,11 @@ import {
   stateFromUrl,
   stateToSearch,
   toggleAllResiduals,
+  toggleAttnBlock,
   toggleFinalLn,
   toggleHeadDisabled,
+  toggleLayerDisabled,
+  toggleMlpBlock,
   type BookState,
 } from './state/bookState';
 import {
@@ -38,6 +41,16 @@ import {
   findCosineNeighbors,
   traceBpeMerges,
 } from './utils/pass2Math';
+import {
+  computeManualWeightLandscape,
+  computePerTokenLoss,
+  computeSampledDistribution,
+  countActiveNeurons,
+  geluTanh,
+  sampleFromDistribution,
+  SCALE_STOPS,
+  type TrainingReplayData,
+} from './utils/pass3Math';
 
 export function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -51,11 +64,22 @@ export function App() {
   const [showContents, setShowContents] = useState<boolean>(false);
   const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
   const [wteWeights, setWteWeights] = useState<Float32Array | null>(null);
+  const [replay, setReplay] = useState<TrainingReplayData | null>(null);
   const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
   const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
+
+  // Interactive chapter lab states
   const [bpeStepIdx, setBpeStepIdx] = useState<number>(0);
   const [ropeSlotA, setRopeSlotA] = useState<number>(2);
   const [ropeSlotB, setRopeSlotB] = useState<number>(5);
+  const [geluProbeX, setGeluProbeX] = useState<number>(1.2);
+  const [temperature, setTemperature] = useState<number>(0.8);
+  const [topK, setTopK] = useState<number>(12);
+  const [topP, setTopP] = useState<number>(0.9);
+  const [sampleBurst, setSampleBurst] = useState<string[]>([]);
+  const [weightDelta, setWeightDelta] = useState<number>(0);
+  const [replayIdx, setReplayIdx] = useState<number>(0);
+  const [scaleIdx, setScaleIdx] = useState<number>(0);
   const [copied, setCopied] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,7 +92,6 @@ export function App() {
   const activeBeat = chapter.beats[clampedBeatIdx] ?? null;
   const activeSceneBeat: SceneBeatId = activeBeat?.sceneBeat ?? 'ch1-1-extremes';
 
-  // Sync deep-link URL state
   useEffect(() => {
     const nextSearch = stateToSearch(state);
     if (window.location.search !== nextSearch) {
@@ -80,11 +103,9 @@ export function App() {
     }
   }, [state]);
 
-  // Mount Three.js Stage once
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
-
     const stage = new TextbookStage(el, {
       onPickToken: (idx) => {
         setState((prev) => {
@@ -99,14 +120,12 @@ export function App() {
       },
     });
     stageRef.current = stage;
-
     return () => {
       stage.dispose();
       stageRef.current = null;
     };
   }, []);
 
-  // Boot verified TypeScript engine and load real weights + wte for PCA
   useEffect(() => {
     const client = new TransformerEngineClient();
     clientRef.current = client;
@@ -126,13 +145,19 @@ export function App() {
         setError(err instanceof Error ? err.message : String(err))
       );
 
+    fetch(`${modelBaseUrl}training_replay.json`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: TrainingReplayData | null) => {
+        if (data) setReplay(data);
+      })
+      .catch(() => undefined);
+
     return () => {
       client.dispose();
       clientRef.current = null;
     };
   }, []);
 
-  // Re-run real forward pass & ablation counterfactual on prompt or ablation change
   useEffect(() => {
     const client = clientRef.current;
     if (!client || !initInfo) return;
@@ -145,7 +170,6 @@ export function App() {
         const baseRes = await client.trace(state.prompt);
         if (!alive) return;
         setBaseline(baseRes);
-
         if (hasActiveAblation(state.ablation)) {
           const ablRes = await client.trace(state.prompt, state.ablation);
           if (!alive) return;
@@ -168,7 +192,6 @@ export function App() {
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  // Exact 3D PCA cloud computed once from our model's real wte.weight [512, 128]
   const pcaCloud = useMemo(() => {
     if (!wteWeights || !initInfo) return null;
     return computeWtePca3D(
@@ -178,7 +201,6 @@ export function App() {
     );
   }, [wteWeights, initInfo]);
 
-  // Real step-by-step BPE merge history for Chapter 1 Beat 2
   const bpeSteps = useMemo(() => {
     if (!initInfo) return [];
     return traceBpeMerges(state.prompt, initInfo.tokenizer);
@@ -191,14 +213,9 @@ export function App() {
     if (!activeTrace) return { resolvedQueryIdx: 0, resolvedKeyIdx: 0 };
     const T = activeTrace.tokens.length;
     const q = clampInt(state.queryIdx ?? T - 1, 0, T - 1);
-
     if (state.keyIdx !== null) {
-      return {
-        resolvedQueryIdx: q,
-        resolvedKeyIdx: clampInt(state.keyIdx, 0, q),
-      };
+      return { resolvedQueryIdx: q, resolvedKeyIdx: clampInt(state.keyIdx, 0, q) };
     }
-
     const lt = activeTrace.trace.layers[state.layer];
     let bestK = Math.max(0, q - 1);
     if (!lt.skipped && q > 0) {
@@ -214,7 +231,6 @@ export function App() {
     return { resolvedQueryIdx: q, resolvedKeyIdx: bestK };
   }, [activeTrace, state.queryIdx, state.keyIdx, state.layer, state.head]);
 
-  // Push live state & beat choreography to 3D stage
   useEffect(() => {
     if (!stageRef.current || !activeTrace || !baseline || !initInfo) return;
     stageRef.current.update({
@@ -234,6 +250,14 @@ export function App() {
       bpeStepIdx: safeBpeStep,
       ropeSlotA,
       ropeSlotB,
+      replay,
+      geluProbeX,
+      temperature,
+      topK,
+      topP,
+      weightDelta,
+      replayIdx,
+      scaleIdx,
     });
   }, [
     activeTrace,
@@ -252,9 +276,16 @@ export function App() {
     safeBpeStep,
     ropeSlotA,
     ropeSlotB,
+    replay,
+    geluProbeX,
+    temperature,
+    topK,
+    topP,
+    weightDelta,
+    replayIdx,
+    scaleIdx,
   ]);
 
-  // Keyboard shortcuts: Left/Right step beats, 1/2/3 switch editions
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -281,236 +312,260 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [maxBeatIdx]);
 
-  // Build real, beat-specific numeric proof lines from the live trace
+  const handleSampleBurst = () => {
+    if (!activeTrace || !initInfo) return;
+    const dist = computeSampledDistribution(
+      activeTrace.trace.finalLogits,
+      temperature,
+      activeSceneBeat === 'ch6-4-nucleus' ? topK : 512,
+      activeSceneBeat === 'ch6-4-nucleus' ? topP : 1.0
+    );
+    const rolls: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      rolls.push(formatToken(initInfo.tokenizer.vocab[sampleFromDistribution(dist)] ?? ''));
+    }
+    setSampleBurst(rolls);
+  };
+
+  const handleStepAutoregressive = () => {
+    if (!activeTrace || !initInfo) return;
+    const dist = computeSampledDistribution(
+      activeTrace.trace.finalLogits,
+      temperature,
+      topK,
+      topP
+    );
+    const piece = initInfo.tokenizer.vocab[sampleFromDistribution(dist)] ?? '';
+    if (!piece || piece === '<|eos|>') return;
+    const nextPrompt = `${state.prompt}${piece}`;
+    setDraftPrompt(nextPrompt);
+    setState((prev) => ({ ...prev, prompt: nextPrompt, queryIdx: null, keyIdx: null }));
+  };
+
   const liveCardLines = useMemo(() => {
     if (!activeTrace || !baseline || !initInfo) return [];
     const { tokens, trace } = activeTrace;
     const qTokObj = tokens[resolvedQueryIdx];
     const qTok = formatTokenExplicit(qTokObj.text);
     const kTok = formatTokenExplicit(tokens[resolvedKeyIdx].text);
+    const vocab = initInfo.tokenizer.vocab;
 
-    // Chapter 1 telemetry
+    // Chapters 1-3
     if (activeSceneBeat === 'ch1-1-extremes') {
-      const charCount = state.prompt.length;
+      const n = state.prompt.length;
       return [
-        `Your sentence: ${charCount} characters → ${tokens.length} BPE subword tokens`,
-        `Compression ratio: ${(charCount / Math.max(1, tokens.length)).toFixed(2)} chars/token (reduces attention pairs from ${charCount * charCount} to ${tokens.length * tokens.length})`,
+        `Sentence: ${n} chars → ${tokens.length} BPE tokens (${(n / Math.max(1, tokens.length)).toFixed(2)} chars/token)`,
       ];
     }
     if (activeSceneBeat === 'ch1-2-bpe-merges') {
-      const snap = bpeSteps[safeBpeStep];
-      if (!snap) return [];
-      return [
-        `Merge step ${snap.step} of ${Math.max(0, bpeSteps.length - 1)} · Current count: ${snap.pieces.length} pieces`,
-        snap.mergedPair
-          ? `Applied rule #${snap.mergeRank}: "${formatTokenExplicit(snap.mergedPair[0])}" + "${formatTokenExplicit(snap.mergedPair[1])}" → "${formatTokenExplicit(snap.mergedResult ?? '')}"`
-          : 'Drag the Merge Step slider on stage to watch BPE compress your text.',
-      ];
+      const s = bpeSteps[safeBpeStep];
+      return s
+        ? [
+            `Merge ${s.step}/${Math.max(0, bpeSteps.length - 1)} · ${s.pieces.length} pieces`,
+            s.mergedPair
+              ? `Rule #${s.mergeRank}: "${formatTokenExplicit(s.mergedPair[0])}" + "${formatTokenExplicit(s.mergedPair[1])}" → "${formatTokenExplicit(s.mergedResult ?? '')}"`
+              : 'Step 0: Single characters.',
+          ]
+        : [];
     }
     if (activeSceneBeat === 'ch1-3-spaces-blindspot') {
-      const withLeadingSpace = tokens.filter((t) => t.text.startsWith(' ')).length;
       return [
-        `Selected token: "${qTok}" (ID #${qTokObj.id}, ${qTokObj.text.length} characters hidden inside 1 ID)`,
-        `${withLeadingSpace} of ${tokens.length} tokens in your sentence carry a glued leading space ("·")`,
+        `Selected "${qTok}" (ID #${qTokObj.id}, ${qTokObj.text.length} chars inside 1 atomic token)`,
       ];
     }
     if (activeSceneBeat === 'ch1-4-token-ids') {
-      return [
-        `Token ID array (first 10): [${tokens.slice(0, 10).map((t) => t.id).join(', ')}${tokens.length > 10 ? ', ...' : ''}]`,
-        `Selected "${qTok}" = #${qTokObj.id} of 512 vocabulary entries`,
-      ];
+      return [`IDs: [${tokens.slice(0, 12).map((t) => t.id).join(', ')}${tokens.length > 12 ? ', ...' : ''}]`];
     }
     if (activeSceneBeat === 'ch1-5-context-window') {
-      const rawCount =
-        bpeSteps.length > 0 ? bpeSteps[bpeSteps.length - 1].pieces.length : tokens.length;
-      return [
-        `Used slots: ${tokens.length} / 64 · Remaining desk capacity: ${64 - tokens.length} tokens`,
-        rawCount > 64
-          ? `Truncated ${rawCount - 64} tokens past slot 64 (invisible to the model)`
-          : 'All tokens fit inside our 64-token context window.',
-      ];
+      return [`Context used: ${tokens.length} / 64 slots (${64 - tokens.length} open)`];
     }
-
-    // Chapter 2 telemetry
     if (activeSceneBeat === 'ch2-1-wte-lookup') {
       const st = computeVectorStats(trace.tokEmb[resolvedQueryIdx]);
-      return [
-        `wte.weight[${qTokObj.id}] ("${qTok}"): 128 floats · ||v|| = ${formatNum(st.l2Norm, 3)}`,
-        `Range: [${formatNum(st.min, 3)}, ${formatNum(st.max, 3)}] · mean = ${formatNum(st.mean, 4)}`,
-      ];
+      return [`wte[#${qTokObj.id}] ("${qTok}"): ||v||=${formatNum(st.l2Norm, 3)} · range [${formatNum(st.min, 2)}, ${formatNum(st.max, 2)}]`];
     }
     if (activeSceneBeat === 'ch2-2-pca-cloud' && wteWeights && pcaCloud) {
-      const nbs = findCosineNeighbors(
-        wteWeights,
-        initInfo.tokenizer.vocab,
-        initInfo.manifest.config.d_model,
-        qTokObj.id,
-        5
-      );
-      const varPct =
-        (pcaCloud.explainedVariance[0] +
-          pcaCloud.explainedVariance[1] +
-          pcaCloud.explainedVariance[2]) *
-        100;
+      const nbs = findCosineNeighbors(wteWeights, vocab, initInfo.manifest.config.d_model, qTokObj.id, 5);
       return [
-        `Top 128D cosine neighbors of "${qTok}": ${nbs.map((n) => `"${formatToken(n.text)}" (${n.cosine.toFixed(2)})`).join(', ')}`,
-        `3D PCA captures ${varPct.toFixed(1)}% of total variance across all 512 real embeddings`,
+        `128D cosine neighbors of "${qTok}": ${nbs.map((n) => `"${formatToken(n.text)}" (${n.cosine.toFixed(2)})`).join(', ')}`,
       ];
     }
     if (activeSceneBeat === 'ch2-3-order-blind') {
-      return [
-        'Without wpe/RoPE: permuting token order produces the exact same multiset of [128] vectors.',
-      ];
+      return ['Without positional stamps, permuting input words leaves the multiset of vectors unchanged.'];
     }
     if (activeSceneBeat === 'ch2-4-wpe-add') {
-      const eNorm = vectorL2Norm(trace.tokEmb[resolvedQueryIdx]);
-      const pNorm = vectorL2Norm(trace.posEmb[resolvedQueryIdx]);
-      const h0Vec = trace.tokEmb[resolvedQueryIdx].map(
-        (v, i) => v + trace.posEmb[resolvedQueryIdx][i]
-      );
       return [
-        `Slot ${resolvedQueryIdx} ("${qTok}"): ||wte|| = ${formatNum(eNorm, 3)} + ||wpe[${resolvedQueryIdx}]|| = ${formatNum(pNorm, 3)} → ||h₀|| = ${formatNum(vectorL2Norm(h0Vec), 3)}`,
-        `Starting Residual Stream slab shape entering Block 0: [${tokens.length} × 128]`,
+        `Slot ${resolvedQueryIdx}: ||wte||=${formatNum(vectorL2Norm(trace.tokEmb[resolvedQueryIdx]), 2)} + ||wpe||=${formatNum(vectorL2Norm(trace.posEmb[resolvedQueryIdx]), 2)} → h₀ [${tokens.length}×128]`,
       ];
     }
     if (activeSceneBeat === 'ch2-5-rope') {
-      const delta = ropeSlotB - ropeSlotA;
-      const rad = (delta * Math.PI) / 10;
-      return [
-        `Slot A = ${ropeSlotA} (${ropeSlotA * 18}°) · Slot B = ${ropeSlotB} (${ropeSlotB * 18}°) → Distance Δ = ${delta}`,
-        `Relative angle Δθ = ${delta * 18}° · cos(Δθ) = ${Math.cos(rad).toFixed(3)} (invariant to shifting both slots equally)`,
-      ];
+      const d = ropeSlotB - ropeSlotA;
+      return [`Slot A=${ropeSlotA}, Slot B=${ropeSlotB} → Δ=${d} slots (${d * 18}°, cos=${Math.cos((d * Math.PI) / 10).toFixed(3)})`];
     }
-
-    // Chapter 3 telemetry
     if (activeSceneBeat === 'ch3-1-residual-bus' || activeSceneBeat === 'ch3-2-cut-highway') {
-      const baseTop = baseline.trace.greedyNextTokenId;
-      const curTop = trace.greedyNextTokenId;
       const cut = hasResidualAblation(state.ablation);
-      const lines = [
-        `Residual Highway: ${cut ? 'CUT (skip connections disabled)' : 'Intact (x + ΔAttn + ΔMLP)'}`,
-        `Prediction: "${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}" (${(baseline.trace.finalProbs[baseTop] * 100).toFixed(1)}%)${
-          ablated
-            ? ` → "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`
-            : ''
-        }`,
+      const bTop = baseline.trace.greedyNextTokenId;
+      const cTop = trace.greedyNextTokenId;
+      return [
+        `Highway: ${cut ? 'CUT' : 'Intact'} · Guess: "${formatTokenExplicit(vocab[bTop] ?? '')}" (${(baseline.trace.finalProbs[bTop] * 100).toFixed(1)}%)${ablated ? ` → "${formatTokenExplicit(vocab[cTop] ?? '')}" (${(trace.finalProbs[cTop] * 100).toFixed(1)}%)` : ''}`,
+        ...(ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null
+          ? [`Loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (+${(ablated.trace.inputLoss - baseline.trace.inputLoss).toFixed(3)})`]
+          : []),
       ];
-      if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
-        const dL = ablated.trace.inputLoss - baseline.trace.inputLoss;
-        lines.push(
-          `Cross-entropy loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dL >= 0 ? '+' : ''}${dL.toFixed(3)})`
-        );
-      }
-      return lines;
     }
     if (activeSceneBeat === 'ch3-3-layernorm') {
       const lt = trace.layers[state.layer];
-      if (lt.skipped) return [`Block ${state.layer} is disabled.`];
-      const rawSt = computeVectorStats(lt.residualBeforeAttn[resolvedQueryIdx]);
-      const lnSt = computeVectorStats(lt.ln1Out[resolvedQueryIdx]);
+      if (lt.skipped) return [`Block ${state.layer} disabled.`];
+      const rSt = computeVectorStats(lt.residualBeforeAttn[resolvedQueryIdx]);
+      const lSt = computeVectorStats(lt.ln1Out[resolvedQueryIdx]);
       return [
-        `Before LN₁ ("${qTok}", Block ${state.layer}): mean = ${formatNum(rawSt.mean, 3)} · std = ${formatNum(rawSt.std, 3)} · range [${formatNum(rawSt.min, 2)}, ${formatNum(rawSt.max, 2)}]`,
-        `After LN₁: mean = ${formatNum(lnSt.mean, 3)} · std = ${formatNum(lnSt.std, 3)} · range [${formatNum(lnSt.min, 2)}, ${formatNum(lnSt.max, 2)}]`,
+        `Before LN₁: mean=${formatNum(rSt.mean, 3)}, std=${formatNum(rSt.std, 3)} → After LN₁: mean=${formatNum(lSt.mean, 3)}, std=${formatNum(lSt.std, 3)}`,
       ];
     }
     if (activeSceneBeat === 'ch3-4-rmsnorm') {
-      const lnOff = isFinalLnDisabled(state.ablation);
-      const baseTop = baseline.trace.greedyNextTokenId;
-      const curTop = trace.greedyNextTokenId;
-      const lines = [
-        `Final LN_f: ${lnOff ? 'DISABLED' : 'Active'} · Top guess: "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`,
+      const off = isFinalLnDisabled(state.ablation);
+      return [
+        `Final LN_f: ${off ? 'DISABLED' : 'Active'} · Loss: ${trace.inputLoss?.toFixed(3) ?? '-'}`,
       ];
-      if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
-        const dL = ablated.trace.inputLoss - baseline.trace.inputLoss;
-        lines.push(
-          `Loss shift vs. baseline ("${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}"): ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dL >= 0 ? '+' : ''}${dL.toFixed(3)})`
-        );
-      } else {
-        const st = computeVectorStats(trace.lnFOut[resolvedQueryIdx]);
-        lines.push(`ln_f output ("${qTok}"): mean = ${formatNum(st.mean, 3)} · rms = ${formatNum(st.rms, 3)}`);
-      }
-      return lines;
     }
 
-    // Chapter 4 telemetry
-    const lt = trace.layers[state.layer];
-    if (lt.skipped) return [`Block ${state.layer} is disabled by Ablation.`];
-    const active: ActiveLayerTrace = lt;
-    const rowW = active.attn.attnWeights[state.head][resolvedQueryIdx];
-    const rowS = active.attn.rawScores[state.head][resolvedQueryIdx];
-
-    if (activeSceneBeat === 'attn-1-problem') {
+    // Chapter 4
+    if (activeSceneBeat.startsWith('attn-')) {
+      const lt = trace.layers[state.layer];
+      if (lt.skipped) return [`Block ${state.layer} disabled.`];
+      const active: ActiveLayerTrace = lt;
+      const rowW = active.attn.attnWeights[state.head][resolvedQueryIdx];
+      if (activeSceneBeat === 'attn-2-dot-product') {
+        const bd = computeDotProductBreakdown(
+          active.attn.q[state.head][resolvedQueryIdx],
+          active.attn.k[state.head][resolvedKeyIdx]
+        );
+        return [
+          `Q("${qTok}") · K("${kTok}") = ${formatNum(bd.rawDot, 3)} ÷ √32 = ${formatNum(bd.scaledScore, 3)}`,
+        ];
+      }
+      if (activeSceneBeat === 'attn-4-mask-softmax') {
+        return [
+          `Masked future tokens: ${tokens.length - 1 - resolvedQueryIdx} · Row sum = ${rowW.reduce((a, b) => a + b, 0).toFixed(6)}`,
+        ];
+      }
+      if (activeSceneBeat === 'attn-5-value-mixer') {
+        const top3 = rowW
+          .slice(0, resolvedQueryIdx + 1)
+          .map((w, idx) => ({ idx, w }))
+          .sort((a, b) => b.w - a.w)
+          .slice(0, 3);
+        return [top3.map((x) => `${(x.w * 100).toFixed(0)}% V("${formatTokenExplicit(tokens[x.idx].text)}")`).join(' + ')];
+      }
       const topId = trace.greedyNextTokenId;
       return [
-        `Sentence length: ${tokens.length} BPE tokens · Highlighted Query: "${qTok}" (slot ${resolvedQueryIdx})`,
-        `Current model top guess after all 4 blocks: "${formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
-      ];
-    }
-    if (activeSceneBeat === 'attn-2-dot-product') {
-      const bd = computeDotProductBreakdown(
-        active.attn.q[state.head][resolvedQueryIdx],
-        active.attn.k[state.head][resolvedKeyIdx]
-      );
-      return [
-        `Comparing Q("${qTok}") · K("${kTok}") in Block ${state.layer} Head ${state.head} (32 dims):`,
-        `Positive votes: +${formatNum(bd.positiveVotes, 2)} · Negative votes: ${formatNum(bd.negativeVotes, 2)} → Raw dot = ${formatNum(bd.rawDot, 3)}`,
-        `Scaled score = ${formatNum(bd.rawDot, 3)} ÷ √32 (${formatNum(bd.scaleDivisor, 3)}) = ${formatNum(bd.scaledScore, 3)}`,
-      ];
-    }
-    if (activeSceneBeat === 'attn-3-scan-row') {
-      let maxC = 0;
-      let minC = 0;
-      for (let c = 1; c < tokens.length; c++) {
-        if (rowS[c] > rowS[maxC]) maxC = c;
-        if (rowS[c] < rowS[minC]) minC = c;
-      }
-      return [
-        `Query "${qTok}" scanned ${tokens.length} Keys in Block ${state.layer} Head ${state.head}:`,
-        `Highest raw score: "${formatTokenExplicit(tokens[maxC].text)}" (${formatNum(rowS[maxC], 2)}) · Lowest: "${formatTokenExplicit(tokens[minC].text)}" (${formatNum(rowS[minC], 2)})`,
-      ];
-    }
-    if (activeSceneBeat === 'attn-4-mask-softmax') {
-      const rowSum = rowW.reduce((a, b) => a + b, 0);
-      const maskedCount = tokens.length - 1 - resolvedQueryIdx;
-      let bestC = 0;
-      for (let c = 1; c <= resolvedQueryIdx; c++) {
-        if (rowW[c] > rowW[bestC]) bestC = c;
-      }
-      return [
-        `Future tokens sealed by Causal Mask: ${maskedCount} · Surviving tokens: ${resolvedQueryIdx + 1}`,
-        `Post-Softmax winner: "${formatTokenExplicit(tokens[bestC].text)}" (${(rowW[bestC] * 100).toFixed(1)}%) · Exact row sum = ${rowSum.toFixed(6)}`,
-      ];
-    }
-    if (activeSceneBeat === 'attn-5-value-mixer') {
-      const top3 = rowW
-        .slice(0, resolvedQueryIdx + 1)
-        .map((w, idx) => ({ idx, w }))
-        .sort((a, b) => b.w - a.w)
-        .slice(0, 3);
-      return [
-        `Value blend poured into "${qTok}" (Block ${state.layer} Head ${state.head}):`,
-        `${top3.map((x) => `${(x.w * 100).toFixed(0)}% V("${formatTokenExplicit(tokens[x.idx].text)}")`).join(' + ')} + ...`,
+        `Block ${state.layer} H${state.head} · Next guess: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
       ];
     }
 
-    const baseTop = baseline.trace.greedyNextTokenId;
-    const curTop = trace.greedyNextTokenId;
-    const off = isHeadDisabled(state.ablation, state.layer, state.head);
-    const lines = [
-      `Block ${state.layer} Head ${state.head}: ${off ? 'DISABLED (Z_h zeroed before W_o)' : 'Active'} · Matrix [${tokens.length} × ${tokens.length}]`,
-      `Prediction: "${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}" (${(baseline.trace.finalProbs[baseTop] * 100).toFixed(1)}%)${
-        ablated
-          ? ` → "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`
-          : ''
-      }`,
-    ];
-    if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
-      const dLoss = ablated.trace.inputLoss - baseline.trace.inputLoss;
-      lines.push(
-        `Prompt cross-entropy loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dLoss >= 0 ? '+' : ''}${dLoss.toFixed(3)})`
-      );
+    // Chapter 5
+    if (activeSceneBeat.startsWith('ch5-')) {
+      const lt = trace.layers[state.layer];
+      if (lt.skipped) return [`Block ${state.layer} disabled.`];
+      const firing = countActiveNeurons(lt.mlp.hidden[resolvedQueryIdx], 0.05);
+      if (activeSceneBeat === 'ch5-3-gelu') {
+        return [
+          `Probe: GELU(${geluProbeX.toFixed(2)}) = ${geluTanh(geluProbeX).toFixed(4)}`,
+          `Live Block ${state.layer} MLP ("${qTok}"): ${firing} / 512 neurons active (>0.05)`,
+        ];
+      }
+      return [
+        `Block ${state.layer} MLP ("${qTok}"): 128 → 512 (${firing} active) → 128 · ||Δmlp|| = ${formatNum(vectorL2Norm(lt.mlp.output[resolvedQueryIdx]), 2)}`,
+      ];
     }
-    return lines;
+
+    // Chapter 6
+    if (activeSceneBeat.startsWith('ch6-')) {
+      const topId = trace.greedyNextTokenId;
+      const pool = computeSampledDistribution(trace.finalLogits, temperature, topK, topP);
+      if (activeSceneBeat === 'ch6-1-logit-lens') {
+        return [
+          trace.logitLens
+            .map((e) => `B${e.afterLayer}:"${formatToken(vocab[e.topTokens[0].id] ?? '')}"(${(e.topTokens[0].prob * 100).toFixed(0)}%)`)
+            .join(' → '),
+        ];
+      }
+      return [
+        `Top logit: "${formatTokenExplicit(vocab[topId] ?? '')}" z=${formatNum(trace.finalLogits[topId], 2)} (P=${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
+        `Sampling pool: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)}) · T=${tokens.length}/64`,
+      ];
+    }
+
+    // Chapter 7
+    if (activeSceneBeat === 'ch7-2-cross-entropy' && wteWeights) {
+      const { entries } = computePerTokenLoss(
+        baseline.trace.lnFOut,
+        baseline.trace.tokenIds,
+        wteWeights,
+        initInfo.tokenizer.vocab_size
+      );
+      const meanL = baseline.trace.inputLoss ?? 0;
+      const worst = entries.reduce((a, b) => (b.loss > a.loss ? b : a), entries[0]);
+      return [
+        `Mean prompt loss = ${meanL.toFixed(3)} · Perplexity = ${Math.exp(meanL).toFixed(2)}`,
+        ...(worst
+          ? [`Most surprising token: "${formatTokenExplicit(vocab[worst.targetId] ?? '')}" (loss ${worst.loss.toFixed(2)}, P=${(worst.targetProb * 100).toFixed(1)}%)`]
+          : []),
+      ];
+    }
+    if (activeSceneBeat === 'ch7-3-manual-backprop' && wteWeights) {
+      const land = computeManualWeightLandscape(
+        baseline.trace.lnFOut,
+        baseline.trace.tokenIds,
+        wteWeights,
+        initInfo.tokenizer.vocab_size,
+        weightDelta
+      );
+      return land
+        ? [
+            `Weight wte["${formatTokenExplicit(vocab[land.targetTokenId] ?? '')}", ${land.dim}] = ${land.currentWeight.toFixed(4)} (Δ ${weightDelta >= 0 ? '+' : ''}${weightDelta.toFixed(2)})`,
+            `Live Loss = ${land.currentLoss.toFixed(4)} (trained: ${land.baseLoss.toFixed(4)}) · Gradient ∂L/∂w = ${land.gradient.toFixed(4)}`,
+          ]
+        : ['Enter at least 2 tokens to compute live loss.'];
+    }
+    if (activeSceneBeat === 'ch7-4-training-replay' && replay) {
+      const ckpt = replay.checkpoints[Math.min(replayIdx, replay.checkpoints.length - 1)];
+      const sample = ckpt.prompts[0];
+      return [
+        `Checkpoint Step ${ckpt.step}: train loss ${ckpt.train_loss.toFixed(3)} · val loss ${ckpt.val_loss.toFixed(3)}`,
+        ...(sample ? [`Sample at step ${ckpt.step}: "${sample.prompt}" → ${sample.completion}`] : []),
+      ];
+    }
+    if (activeSceneBeat === 'ch7-5-hallucination') {
+      const topId = trace.greedyNextTokenId;
+      return [
+        `Current top prediction: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
+      ];
+    }
+
+    // Chapter 8
+    if (activeSceneBeat === 'ch8-1-ablation') {
+      const bTop = baseline.trace.greedyNextTokenId;
+      const cTop = trace.greedyNextTokenId;
+      const dL =
+        ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null
+          ? ablated.trace.inputLoss - baseline.trace.inputLoss
+          : 0;
+      return [
+        `Baseline: "${formatTokenExplicit(vocab[bTop] ?? '')}" (${(baseline.trace.finalProbs[bTop] * 100).toFixed(1)}%) → Now: "${formatTokenExplicit(vocab[cTop] ?? '')}" (${(trace.finalProbs[cTop] * 100).toFixed(1)}%)`,
+        `Cross-entropy loss Δ: ${dL >= 0 ? '+' : ''}${dL.toFixed(3)}`,
+      ];
+    }
+    if (activeSceneBeat === 'ch8-2-scale') {
+      const s = SCALE_STOPS[scaleIdx];
+      const mult = Math.max(1, Math.round(s.params / initInfo.manifest.total_params));
+      return [
+        `${s.label}: ${s.params.toLocaleString()} params (${mult.toLocaleString()}× this model)`,
+        `${s.layers} layers · d_model ${s.dModel.toLocaleString()} · ${s.heads} heads · ctx ${s.context.toLocaleString()}`,
+      ];
+    }
+    return [
+      `${initInfo.manifest.total_params.toLocaleString()} real params · ${tokens.length} tokens · traced in ${activeTrace.elapsedMs}ms`,
+    ];
   }, [
     activeTrace,
     baseline,
@@ -529,6 +584,14 @@ export function App() {
     pcaCloud,
     ropeSlotA,
     ropeSlotB,
+    geluProbeX,
+    temperature,
+    topK,
+    topP,
+    weightDelta,
+    replay,
+    replayIdx,
+    scaleIdx,
   ]);
 
   const copyLink = async () => {
@@ -544,13 +607,16 @@ export function App() {
   const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
   const resCut = hasResidualAblation(state.ablation);
   const lnFOff = isFinalLnDisabled(state.ablation);
+  const attnOff = (state.ablation.disabledAttnBlocks ?? []).includes(state.layer);
+  const mlpOff = (state.ablation.disabledMlpBlocks ?? []).includes(state.layer);
+  const layerOff = (state.ablation.disabledLayers ?? []).includes(state.layer);
 
   return (
     <div className="book-app">
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-title">LLM Atlas</span>
-          <span className="brand-tag">Interactive Transformer Textbook</span>
+          <span className="brand-tag">8-Chapter Interactive Transformer Textbook</span>
         </div>
 
         <form
@@ -559,6 +625,7 @@ export function App() {
             e.preventDefault();
             if (!draftPrompt.trim()) return;
             setBpeStepIdx(0);
+            setWeightDelta(0);
             setState((prev) => ({
               ...prev,
               prompt: draftPrompt,
@@ -583,6 +650,7 @@ export function App() {
               if (!p) return;
               setDraftPrompt(p.text);
               setBpeStepIdx(0);
+              setWeightDelta(0);
               setState((prev) => ({
                 ...prev,
                 prompt: p.text,
@@ -648,7 +716,6 @@ export function App() {
               Loading 862,464 real trained parameters...
             </div>
           )}
-
           {error && <div className="error-toast">{error}</div>}
 
           <div className="stage-hud-top">
@@ -656,7 +723,7 @@ export function App() {
               {activeSceneBeat === 'ch1-2-bpe-merges' && bpeSteps.length > 1 && (
                 <>
                   <label className="hud-slider mono">
-                    <span>Merge Step {safeBpeStep}/{bpeSteps.length - 1}</span>
+                    <span>Merge {safeBpeStep}/{bpeSteps.length - 1}</span>
                     <input
                       type="range"
                       min={0}
@@ -669,9 +736,7 @@ export function App() {
                     type="button"
                     className="mini-btn"
                     onClick={() =>
-                      setBpeStepIdx((s) =>
-                        s >= bpeSteps.length - 1 ? 0 : s + 1
-                      )
+                      setBpeStepIdx((s) => (s >= bpeSteps.length - 1 ? 0 : s + 1))
                     }
                   >
                     Step +1
@@ -683,23 +748,11 @@ export function App() {
                 <>
                   <label className="hud-slider mono">
                     <span>Slot A: {ropeSlotA}</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={24}
-                      value={ropeSlotA}
-                      onChange={(e) => setRopeSlotA(Number(e.target.value))}
-                    />
+                    <input type="range" min={0} max={24} value={ropeSlotA} onChange={(e) => setRopeSlotA(Number(e.target.value))} />
                   </label>
                   <label className="hud-slider mono">
                     <span>Slot B: {ropeSlotB}</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={24}
-                      value={ropeSlotB}
-                      onChange={(e) => setRopeSlotB(Number(e.target.value))}
-                    />
+                    <input type="range" min={0} max={24} value={ropeSlotB} onChange={(e) => setRopeSlotB(Number(e.target.value))} />
                   </label>
                 </>
               )}
@@ -708,12 +761,7 @@ export function App() {
                 <button
                   type="button"
                   className={`mini-btn ${resCut ? 'is-warm' : 'is-active'}`}
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      ablation: toggleAllResiduals(prev.ablation),
-                    }))
-                  }
+                  onClick={() => setState((prev) => ({ ...prev, ablation: toggleAllResiduals(prev.ablation) }))}
                 >
                   {resCut ? 'Reconnect Residual Highway' : 'Cut Residual Highway'}
                 </button>
@@ -723,18 +771,16 @@ export function App() {
                 <button
                   type="button"
                   className={`mini-btn ${lnFOff ? 'is-warm' : 'is-active'}`}
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      ablation: toggleFinalLn(prev.ablation),
-                    }))
-                  }
+                  onClick={() => setState((prev) => ({ ...prev, ablation: toggleFinalLn(prev.ablation) }))}
                 >
                   {lnFOff ? 'Restore Final LN_f' : 'Disable Final LN_f'}
                 </button>
               )}
 
-              {(activeSceneBeat === 'ch3-3-layernorm' || state.chapterId === 4) && (
+              {(activeSceneBeat === 'ch3-3-layernorm' ||
+                state.chapterId === 4 ||
+                state.chapterId === 5 ||
+                activeSceneBeat === 'ch8-1-ablation') && (
                 <>
                   <span className="hud-label">Block</span>
                   {[0, 1, 2, 3].map((l) => (
@@ -759,9 +805,7 @@ export function App() {
                       <button
                         key={h}
                         type="button"
-                        className={`mini-btn mono ${
-                          off ? 'is-warm' : state.head === h ? 'is-active' : ''
-                        }`}
+                        className={`mini-btn mono ${off ? 'is-warm' : state.head === h ? 'is-active' : ''}`}
                         onClick={() => setState((prev) => ({ ...prev, head: h }))}
                       >
                         H{h}
@@ -775,53 +819,157 @@ export function App() {
                 <button
                   type="button"
                   className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      showPreSoftmax: !prev.showPreSoftmax,
-                    }))
-                  }
+                  onClick={() => setState((prev) => ({ ...prev, showPreSoftmax: !prev.showPreSoftmax }))}
                 >
-                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}
+                  {state.showPreSoftmax ? 'Raw Scores' : 'Softmax %'}
                 </button>
               )}
 
-              {(activeSceneBeat === 'attn-5-value-mixer' ||
-                activeSceneBeat === 'attn-6-multihead-full') && (
+              {(activeSceneBeat === 'attn-5-value-mixer' || activeSceneBeat === 'attn-6-multihead-full') && (
                 <button
                   type="button"
                   className={`mini-btn ${headOff ? 'is-warm' : ''}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
-                      ablation: toggleHeadDisabled(
-                        prev.ablation,
-                        prev.layer,
-                        prev.head
-                      ),
+                      ablation: toggleHeadDisabled(prev.ablation, prev.layer, prev.head),
                     }))
                   }
                 >
                   {headOff ? `Re-enable H${state.head}` : `Disable H${state.head}`}
                 </button>
               )}
+
+              {activeSceneBeat === 'ch5-3-gelu' && (
+                <label className="hud-slider mono">
+                  <span>GELU x: {geluProbeX.toFixed(2)}</span>
+                  <input type="range" min={-3.2} max={3.2} step={0.1} value={geluProbeX} onChange={(e) => setGeluProbeX(Number(e.target.value))} />
+                </label>
+              )}
+
+              {(activeSceneBeat === 'ch6-3-temperature' ||
+                activeSceneBeat === 'ch6-4-nucleus' ||
+                activeSceneBeat === 'ch6-5-autoregression') && (
+                <label className="hud-slider mono">
+                  <span>τ: {temperature.toFixed(2)}</span>
+                  <input type="range" min={0.1} max={2.0} step={0.05} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
+                </label>
+              )}
+
+              {(activeSceneBeat === 'ch6-4-nucleus' || activeSceneBeat === 'ch6-5-autoregression') && (
+                <>
+                  <label className="hud-slider mono">
+                    <span>k: {topK}</span>
+                    <input type="range" min={1} max={40} step={1} value={topK} onChange={(e) => setTopK(Number(e.target.value))} />
+                  </label>
+                  <label className="hud-slider mono">
+                    <span>p: {topP.toFixed(2)}</span>
+                    <input type="range" min={0.1} max={1.0} step={0.05} value={topP} onChange={(e) => setTopP(Number(e.target.value))} />
+                  </label>
+                </>
+              )}
+
+              {(activeSceneBeat === 'ch6-3-temperature' || activeSceneBeat === 'ch6-4-nucleus') && (
+                <button type="button" className="primary-btn" onClick={handleSampleBurst}>
+                  Sample 10
+                </button>
+              )}
+
+              {activeSceneBeat === 'ch6-5-autoregression' && (
+                <button type="button" className="primary-btn" disabled={busy} onClick={handleStepAutoregressive}>
+                  Step +1 Token
+                </button>
+              )}
+
+              {activeSceneBeat === 'ch7-3-manual-backprop' && (
+                <>
+                  <label className="hud-slider mono">
+                    <span>Nudge Δw: {weightDelta >= 0 ? '+' : ''}{weightDelta.toFixed(2)}</span>
+                    <input type="range" min={-2.0} max={2.0} step={0.05} value={weightDelta} onChange={(e) => setWeightDelta(Number(e.target.value))} />
+                  </label>
+                  {weightDelta !== 0 && (
+                    <button type="button" className="mini-btn" onClick={() => setWeightDelta(0)}>
+                      Reset Δw
+                    </button>
+                  )}
+                </>
+              )}
+
+              {activeSceneBeat === 'ch7-4-training-replay' && replay && (
+                <label className="hud-slider mono">
+                  <span>Step {replay.checkpoints[Math.min(replayIdx, replay.checkpoints.length - 1)].step}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, replay.checkpoints.length - 1)}
+                    value={replayIdx}
+                    onChange={(e) => setReplayIdx(Number(e.target.value))}
+                  />
+                </label>
+              )}
+
+              {activeSceneBeat === 'ch7-5-hallucination' && (
+                <button
+                  type="button"
+                  className="primary-btn"
+                  onClick={() => {
+                    const text = 'The capital of France is a little girl named';
+                    setDraftPrompt(text);
+                    setState((prev) => ({ ...prev, prompt: text, queryIdx: null, keyIdx: null }));
+                  }}
+                >
+                  Load Hallucination Specimen
+                </button>
+              )}
+
+              {activeSceneBeat === 'ch8-1-ablation' && (
+                <>
+                  <button
+                    type="button"
+                    className={`mini-btn ${headOff ? 'is-warm' : ''}`}
+                    onClick={() => setState((prev) => ({ ...prev, ablation: toggleHeadDisabled(prev.ablation, prev.layer, 3) }))}
+                  >
+                    {headOff ? 'H3 Off' : 'Disable H3'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mini-btn ${attnOff ? 'is-warm' : ''}`}
+                    onClick={() => setState((prev) => ({ ...prev, ablation: toggleAttnBlock(prev.ablation, prev.layer) }))}
+                  >
+                    {attnOff ? 'Attn Off' : 'Disable Attn'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mini-btn ${mlpOff ? 'is-warm' : ''}`}
+                    onClick={() => setState((prev) => ({ ...prev, ablation: toggleMlpBlock(prev.ablation, prev.layer) }))}
+                  >
+                    {mlpOff ? 'MLP Off' : 'Disable MLP'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mini-btn ${layerOff ? 'is-warm' : ''}`}
+                    onClick={() => setState((prev) => ({ ...prev, ablation: toggleLayerDisabled(prev.ablation, prev.layer) }))}
+                  >
+                    {layerOff ? 'Block Skipped' : 'Skip Block'}
+                  </button>
+                </>
+              )}
+
+              {activeSceneBeat === 'ch8-2-scale' && (
+                <label className="hud-slider mono">
+                  <span>Scale: {SCALE_STOPS[scaleIdx].label.split(' ')[0]}</span>
+                  <input type="range" min={0} max={SCALE_STOPS.length - 1} value={scaleIdx} onChange={(e) => setScaleIdx(Number(e.target.value))} />
+                </label>
+              )}
             </div>
 
             <div className="hud-group">
               {hasActiveAblation(state.ablation) && (
-                <button
-                  type="button"
-                  className="mini-btn is-warm"
-                  onClick={() => setState((prev) => ({ ...prev, ablation: {} }))}
-                >
+                <button type="button" className="mini-btn is-warm" onClick={() => setState((prev) => ({ ...prev, ablation: {} }))}>
                   Reset Ablation
                 </button>
               )}
-              <button
-                type="button"
-                className="mini-btn"
-                onClick={() => stageRef.current?.resetCamera()}
-              >
+              <button type="button" className="mini-btn" onClick={() => stageRef.current?.resetCamera()}>
                 Reset View
               </button>
             </div>
@@ -829,28 +977,32 @@ export function App() {
 
           {activeTrace && (
             <div className="stage-hud-bottom">
+              {sampleBurst.length > 0 &&
+                (activeSceneBeat === 'ch6-3-temperature' || activeSceneBeat === 'ch6-4-nucleus') && (
+                  <div className="sample-burst mono">
+                    <span className="hud-label">10 live draws:</span>
+                    {sampleBurst.map((s, i) => (
+                      <span key={i} className="burst-chip">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
               <div className="token-bar" aria-label="Select token">
                 <span className="hud-label">
-                  {activeSceneBeat === 'attn-2-dot-product'
-                    ? 'Compare Key:'
-                    : 'Inspect Token:'}
+                  {activeSceneBeat === 'attn-2-dot-product' ? 'Compare Key:' : 'Inspect Token:'}
                 </span>
                 {activeTrace.tokens.map((tok, idx) => {
                   const isQ = idx === resolvedQueryIdx;
-                  const isK =
-                    activeSceneBeat === 'attn-2-dot-product' &&
-                    idx === resolvedKeyIdx;
-                  const disabledKey =
-                    activeSceneBeat === 'attn-2-dot-product' &&
-                    idx > resolvedQueryIdx;
+                  const isK = activeSceneBeat === 'attn-2-dot-product' && idx === resolvedKeyIdx;
+                  const disabledKey = activeSceneBeat === 'attn-2-dot-product' && idx > resolvedQueryIdx;
                   return (
                     <button
                       key={`${tok.start}-${idx}`}
                       type="button"
                       disabled={disabledKey}
-                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${
-                        isK ? 'is-key' : ''
-                      }`}
+                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${isK ? 'is-key' : ''}`}
                       onClick={() =>
                         setState((prev) =>
                           activeSceneBeat === 'attn-2-dot-product'

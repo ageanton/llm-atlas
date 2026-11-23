@@ -19,7 +19,9 @@ import {
   sequentialColor,
 } from '../utils/math';
 import type { BpeStepSnapshot, PcaCloudData } from '../utils/pass2Math';
+import type { TrainingReplayData } from '../utils/pass3Math';
 import { buildChapter123Beat } from './pass2Builders';
+import { buildChapter5678Beat } from './pass3Builders';
 
 export interface StageCallbacks {
   onPickToken: (index: number) => void;
@@ -43,6 +45,14 @@ export interface StageSnapshot {
   bpeStepIdx: number;
   ropeSlotA: number;
   ropeSlotB: number;
+  replay: TrainingReplayData | null;
+  geluProbeX: number;
+  temperature: number;
+  topK: number;
+  topP: number;
+  weightDelta: number;
+  replayIdx: number;
+  scaleIdx: number;
 }
 
 interface ClickTag {
@@ -259,6 +269,36 @@ export class TextbookStage {
         this.camTargetPos.set(0, 4.3, 9.4);
         this.camTargetLook.set(0, 0.35, 0);
         break;
+      case 'ch5-1-mlp-role':
+      case 'ch5-2-expansion':
+      case 'ch5-4-wdown':
+      case 'ch6-1-logit-lens':
+      case 'ch6-6-kv-quant':
+      case 'ch7-4-training-replay':
+      case 'ch8-4-post-training':
+      case 'ch8-5-capstone':
+        this.camTargetPos.set(0.2, 3.2, 10.6);
+        this.camTargetLook.set(0.2, 0.6, 0);
+        break;
+      case 'ch5-3-gelu':
+      case 'ch5-5-swiglu-moe':
+      case 'ch7-1-step0':
+      case 'ch8-3-frontier-diff':
+        this.camTargetPos.set(0.2, 4.4, 10.4);
+        this.camTargetLook.set(0.2, 0.5, 0);
+        break;
+      case 'ch6-2-unembed':
+      case 'ch6-3-temperature':
+      case 'ch6-4-nucleus':
+      case 'ch6-5-autoregression':
+      case 'ch7-2-cross-entropy':
+      case 'ch7-3-manual-backprop':
+      case 'ch7-5-hallucination':
+      case 'ch8-1-ablation':
+      case 'ch8-2-scale':
+        this.camTargetPos.set(0, 3.6, 11.2);
+        this.camTargetLook.set(0, 0.85, 0);
+        break;
       case 'attn-1-problem':
         this.camTargetPos.set(0, 3.2, 10.2);
         this.camTargetLook.set(0, 0.25, 0);
@@ -319,6 +359,20 @@ export class TextbookStage {
       snap
     );
     if (handled) return;
+
+    const handledP3 = buildChapter5678Beat(
+      {
+        stageRoot: this.stageRoot,
+        interactives: this.interactives,
+        trackGeo: (g) => this.trackGeo(g),
+        trackMat: (m) => this.trackMat(m),
+        trackTex: (t) => this.trackTex(t),
+        addLabel: (p, s, pos, sc, acc, mut) =>
+          this.addLabel(p, s, pos, sc, acc, mut),
+      },
+      snap
+    );
+    if (handledP3) return;
 
     const layerTrace = snap.traceRes.trace.layers[snap.layer];
     if (layerTrace.skipped) {
