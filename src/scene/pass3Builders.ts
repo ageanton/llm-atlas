@@ -9,7 +9,6 @@ import type {
 } from '../engine/types';
 import {
   createTensorTexture,
-  divergingColor,
   formatNum,
   formatToken,
   vectorL2Norm,
