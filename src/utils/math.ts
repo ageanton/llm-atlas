@@ -1,251 +1,240 @@
 import * as THREE from 'three';
 
+export function formatToken(tok: string): string {
+  return tok
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+    .replace(/ /g, '·');
+}
+
 export function sequentialColor(tRaw: number): string {
   const t = Math.max(0, Math.min(1, tRaw));
-  const stops: [number, [number, number, number]][] = [
-    [0.0, [242, 245, 250]],
-    [0.25, [191, 219, 254]],
-    [0.55, [59, 130, 246]],
-    [0.82, [29, 78, 216]],
-    [1.0, [23, 37, 84]],
-  ];
-  return interpolateStops(t, stops);
+  const r = Math.round(245 - 200 * t);
+  const g = Math.round(247 - 140 * t);
+  const b = Math.round(250 - 40 * t);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
-export function divergingColor(normRaw: number): string {
-  const v = Math.max(-1, Math.min(1, normRaw));
-  const t = (v + 1) / 2;
-  const stops: [number, [number, number, number]][] = [
-    [0.0, [30, 58, 138]],
-    [0.25, [96, 165, 250]],
-    [0.5, [248, 250, 252]],
-    [0.75, [251, 146, 60]],
-    [1.0, [180, 83, 9]],
-  ];
-  return interpolateStops(t, stops);
-}
-
-function interpolateStops(
-  t: number,
-  stops: [number, [number, number, number]][]
-): string {
-  for (let i = 0; i < stops.length - 1; i++) {
-    const [t0, c0] = stops[i];
-    const [t1, c1] = stops[i + 1];
-    if (t >= t0 && t <= t1) {
-      const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
-      const r = Math.round(c0[0] + (c1[0] - c0[0]) * f);
-      const g = Math.round(c0[1] + (c1[1] - c0[1]) * f);
-      const b = Math.round(c0[2] + (c1[2] - c0[2]) * f);
-      return `rgb(${r}, ${g}, ${b})`;
-    }
+export function divergingColor(val: number, maxAbs: number): string {
+  if (maxAbs <= 1e-9) return 'rgb(240, 243, 246)';
+  const t = Math.max(-1, Math.min(1, val / maxAbs));
+  if (t < 0) {
+    const k = -t;
+    const r = Math.round(247 - 40 * k);
+    const g = Math.round(248 - 140 * k);
+    const b = Math.round(250 - 200 * k);
+    return `rgb(${r}, ${g}, ${b})`;
   }
-  const last = stops[stops.length - 1][1];
-  return `rgb(${last[0]}, ${last[1]}, ${last[2]})`;
+  const k = t;
+  const r = Math.round(247 + 0 * k);
+  const g = Math.round(248 - 150 * k);
+  const b = Math.round(250 - 150 * k);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
-export function formatToken(raw: string): string {
-  if (raw === '\n') return '↵';
-  if (raw === ' ') return '␣';
-  return raw.replace(/^ /, '');
+export function threeSequentialColor(tRaw: number): THREE.Color {
+  const t = Math.max(0, Math.min(1, tRaw));
+  const r = (245 - 200 * t) / 255;
+  const g = (247 - 140 * t) / 255;
+  const b = (250 - 40 * t) / 255;
+  return new THREE.Color(r, g, b);
 }
 
-export function formatTokenExplicit(raw: string): string {
-  if (raw === '\n') return '\\n';
-  if (raw === ' ') return '·';
-  return raw.replace(/^ /, '·');
-}
-
-export function formatNum(n: number, digits = 3): string {
-  if (!Number.isFinite(n)) return '0';
-  return n.toFixed(digits);
-}
-
-export function vectorL2Norm(vec: number[]): number {
-  let sum = 0;
-  for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
-  return Math.sqrt(sum);
-}
-
-export function countActiveNeurons(vec: number[], threshold = 0.05): number {
-  let count = 0;
-  for (let i = 0; i < vec.length; i++) {
-    if (vec[i] > threshold) count++;
+export function threeDivergingColor(val: number, maxAbs: number): THREE.Color {
+  if (maxAbs <= 1e-9) return new THREE.Color(0xf0f3f6);
+  const t = Math.max(-1, Math.min(1, val / maxAbs));
+  if (t < 0) {
+    const k = -t;
+    return new THREE.Color(
+      (247 - 40 * k) / 255,
+      (248 - 140 * k) / 255,
+      (250 - 200 * k) / 255
+    );
   }
-  return count;
+  const k = t;
+  return new THREE.Color(
+    (247 + 0 * k) / 255,
+    (248 - 150 * k) / 255,
+    (250 - 150 * k) / 255
+  );
 }
 
-export interface SampledToken {
-  id: number;
-  prob: number;
-  logit: number;
-}
-
-export function computeSampledDistribution(
-  logits: number[],
-  temperature: number,
-  topK: number,
-  topP: number
-): SampledToken[] {
-  const temp = Math.max(0.05, temperature);
-  const scaled = logits.map((v) => v / temp);
-
-  let maxVal = -Infinity;
-  for (let i = 0; i < scaled.length; i++) {
-    if (scaled[i] > maxVal) maxVal = scaled[i];
+export function makeTextSprite(
+  text: string,
+  options?: {
+    fontSize?: number;
+    fontFamily?: string;
+    fontColor?: string;
+    bgColor?: string;
+    borderColor?: string;
+    borderWidth?: number;
+    padding?: number;
+    scale?: number;
   }
-
-  const indexed = scaled.map((v, id) => ({
-    id,
-    logit: logits[id],
-    exp: Math.exp(v - maxVal),
-  }));
-  indexed.sort((a, b) => b.exp - a.exp || a.id - b.id);
-
-  const kClamped = Math.max(1, Math.min(indexed.length, Math.round(topK)));
-  const afterK = indexed.slice(0, kClamped);
-
-  let kSum = 0;
-  for (const item of afterK) kSum += item.exp;
-
-  const afterP: SampledToken[] = [];
-  let cumulative = 0;
-  for (const item of afterK) {
-    const p = item.exp / kSum;
-    afterP.push({ id: item.id, prob: p, logit: item.logit });
-    cumulative += p;
-    if (cumulative >= topP && afterP.length >= 1) break;
-  }
-
-  let finalSum = 0;
-  for (const item of afterP) finalSum += item.prob;
-  return afterP.map((item) => ({
-    id: item.id,
-    logit: item.logit,
-    prob: finalSum > 0 ? item.prob / finalSum : 0,
-  }));
-}
-
-export function sampleFromDistribution(dist: SampledToken[]): number {
-  const r = Math.random();
-  let acc = 0;
-  for (const item of dist) {
-    acc += item.prob;
-    if (r <= acc) return item.id;
-  }
-  return dist[dist.length - 1]?.id ?? 0;
-}
-
-export function createTensorTexture(
-  matrix: number[][],
-  mode: 'diverging' | 'sequential' = 'diverging',
-  transpose = false
-): THREE.CanvasTexture {
-  const srcRows = matrix.length;
-  const srcCols = matrix[0]?.length ?? 1;
-  const rows = transpose ? srcCols : srcRows;
-  const cols = transpose ? srcRows : srcCols;
+): THREE.Sprite {
+  const fontSize = options?.fontSize ?? 26;
+  const fontFamily =
+    options?.fontFamily ??
+    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+  const fontColor = options?.fontColor ?? '#1a2233';
+  const bgColor = options?.bgColor ?? 'rgba(255, 255, 255, 0.92)';
+  const borderColor = options?.borderColor ?? 'rgba(209, 217, 226, 0.8)';
+  const borderWidth = options?.borderWidth ?? 2;
+  const padding = options?.padding ?? 14;
+  const scale = options?.scale ?? 1.0;
 
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.min(cols, 512));
-  canvas.height = Math.max(1, Math.min(rows, 512));
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return new THREE.Sprite();
+
+  const font = `600 ${fontSize}px ${fontFamily}`;
+  ctx.font = font;
+  const metrics = ctx.measureText(text);
+  const textWidth = Math.ceil(metrics.width);
+  const textHeight = fontSize * 1.25;
+
+  canvas.width = Math.max(32, textWidth + padding * 2);
+  canvas.height = Math.max(32, Math.ceil(textHeight + padding * 2));
+
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+
+  if (bgColor && bgColor !== 'transparent') {
+    ctx.fillStyle = bgColor;
+    ctx.beginPath();
+    const r = 8;
+    const x = borderWidth / 2;
+    const y = borderWidth / 2;
+    const w = canvas.width - borderWidth;
+    const h = canvas.height - borderWidth;
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fill();
+
+    if (borderWidth > 0 && borderColor) {
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = borderWidth;
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = fontColor;
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  const sprite = new THREE.Sprite(material);
+  const aspect = canvas.width / canvas.height;
+  const baseH = (canvas.height / 100) * scale;
+  sprite.scale.set(baseH * aspect, baseH, 1);
+  return sprite;
+}
+
+export function drawAttentionHeatmap(
+  canvas: HTMLCanvasElement,
+  scores: number[][],
+  options?: {
+    labels?: string[];
+    queryHighlight?: number | null;
+    keyHighlight?: number | null;
+    isPreSoftmax?: boolean;
+    cellSize?: number;
+  }
+): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const N = scores.length;
+  if (N === 0) return;
+
+  const cellSize = options?.cellSize ?? 22;
+  const marginL = 50;
+  const marginT = 50;
+  const marginR = 16;
+  const marginB = 16;
+
+  const w = marginL + N * cellSize + marginR;
+  const h = marginT + N * cellSize + marginB;
+
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
 
   let maxAbs = 1e-6;
-  let minVal = Infinity;
-  let maxVal = -Infinity;
-  for (let r = 0; r < srcRows; r++) {
-    const row = matrix[r];
-    for (let c = 0; c < srcCols; c++) {
-      const v = row[c];
-      if (v < minVal) minVal = v;
-      if (v > maxVal) maxVal = v;
-      const a = Math.abs(v);
-      if (a > maxAbs) maxAbs = a;
-    }
-  }
-  if (!Number.isFinite(minVal)) minVal = 0;
-  if (!Number.isFinite(maxVal)) maxVal = 1;
-
-  const w = canvas.width;
-  const h = canvas.height;
-  for (let py = 0; py < h; py++) {
-    const r = Math.min(rows - 1, Math.floor((py / h) * rows));
-    for (let px = 0; px < w; px++) {
-      const c = Math.min(cols - 1, Math.floor((px / w) * cols));
-      const val = transpose ? matrix[c][r] : matrix[r][c];
-      if (mode === 'sequential') {
-        const norm =
-          maxVal > minVal ? (val - minVal) / (maxVal - minVal) : 0;
-        ctx.fillStyle = sequentialColor(norm);
-      } else {
-        ctx.fillStyle = divergingColor(val / maxAbs);
-      }
-      ctx.fillRect(px, py, 1, 1);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j <= i; j++) {
+      const v = scores[i][j];
+      if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
     }
   }
 
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.LinearFilter;
-  tex.generateMipmaps = false;
-  return tex;
-}
-
-function roundRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number
-): void {
-  const rad = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rad, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rad);
-  ctx.arcTo(x + w, y + h, x, y + h, rad);
-  ctx.arcTo(x, y + h, x, y, rad);
-  ctx.arcTo(x, y, x + w, y, rad);
-  ctx.closePath();
-}
-
-export function createPlaqueTexture(
-  title: string,
-  subtitle?: string,
-  accent = '#1d4ed8',
-  muted = false
-): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 420;
-  canvas.height = subtitle ? 124 : 84;
-  const ctx = canvas.getContext('2d')!;
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 18);
-  ctx.fillStyle = muted
-    ? 'rgba(241, 245, 249, 0.94)'
-    : 'rgba(255, 255, 255, 0.95)';
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = muted ? '#cbd5e1' : accent;
-  ctx.stroke();
-
-  ctx.fillStyle = muted ? '#64748b' : '#141923';
-  ctx.font =
-    '700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.font = '11px ui-monospace, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(title.slice(0, 24), canvas.width / 2, subtitle ? 44 : 42);
 
-  if (subtitle) {
-    ctx.fillStyle = muted ? '#b45309' : accent;
-    ctx.font = '600 21px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillText(subtitle.slice(0, 30), canvas.width / 2, 86);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const x = marginL + j * cellSize;
+      const y = marginT + i * cellSize;
+
+      if (j > i) {
+        ctx.fillStyle = '#f0f3f6';
+        ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
+        ctx.fillStyle = '#c5d0dc';
+        ctx.fillText('—', x + cellSize / 2, y + cellSize / 2);
+        continue;
+      }
+
+      const val = scores[i][j];
+      ctx.fillStyle = options?.isPreSoftmax
+        ? divergingColor(val, maxAbs)
+        : sequentialColor(val);
+      ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
+
+      if (
+        (options?.queryHighlight === i && options?.keyHighlight === j) ||
+        options?.queryHighlight === i
+      ) {
+        ctx.strokeStyle = '#1d4ed8';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 0.5, y + 0.5, cellSize - 2, cellSize - 2);
+      }
+    }
   }
 
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  ctx.fillStyle = '#334155';
+  ctx.font = '10px ui-monospace, monospace';
+  const labels = options?.labels ?? [];
+  for (let k = 0; k < N; k++) {
+    const raw = labels[k] ?? `${k}`;
+    const clean = formatToken(raw).slice(0, 4);
+
+    ctx.save();
+    ctx.translate(marginL + k * cellSize + cellSize / 2, marginT - 10);
+    ctx.rotate(-Math.PI / 4);
+    ctx.textAlign = 'left';
+    ctx.fillText(clean, 0, 0);
+    ctx.restore();
+
+    ctx.textAlign = 'right';
+    ctx.fillText(clean, marginL - 6, marginT + k * cellSize + cellSize / 2);
+  }
 }

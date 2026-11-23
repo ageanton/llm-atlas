@@ -1,580 +1,422 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnatomyInspector } from './components/AnatomyInspector';
-import type { TrainingReplayData } from './components/NodeLab';
-import { getAnatomyNode, PRESET_PROMPTS } from './content/llmAnatomy';
-import { TransformerEngineClient } from './engine/client';
-import type {
-  AblationConfig,
-  ActiveLayerTrace,
-  EngineInitResult,
-  EngineTraceResult,
-} from './engine/types';
-import { ExplodedWorld } from './scene/ExplodedWorld';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  hasActiveAblation,
+  type BookState,
+  DEFAULT_PROMPT,
   isHeadDisabled,
+  hasActiveAblation,
   stateFromUrl,
-  stateToSearch,
-  type AtlasState,
-  type Register,
-} from './state/atlasState';
-import {
-  computeSampledDistribution,
-  countActiveNeurons,
-  formatNum,
-  formatToken,
-  formatTokenExplicit,
-  sampleFromDistribution,
-  vectorL2Norm,
-} from './utils/math';
+  stateToUrl,
+  toggleHeadDisabled,
+} from './state/bookState';
+import { ALL_CHAPTERS, type Chapter } from './content/bookData';
+import { BookReader } from './components/BookReader';
+import { TextbookStage } from './scene/TextbookStage';
+import { TransformerEngineClient } from './engine/client';
+import type { ModelTrace } from './engine/types';
+import { formatToken } from './utils/math';
 
 export function App() {
-  const mountRef = useRef<HTMLDivElement | null>(null);
-  const worldRef = useRef<ExplodedWorld | null>(null);
-  const clientRef = useRef<TransformerEngineClient | null>(null);
-
-  const [state, setState] = useState<AtlasState>(() =>
+  const [state, setState] = useState<BookState>(() =>
     stateFromUrl(window.location.search)
   );
-  const [draftPrompt, setDraftPrompt] = useState<string>(state.prompt);
-  const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
-  const [replay, setReplay] = useState<TrainingReplayData | null>(null);
-  const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
-  const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
-  const [hoveredTokenIdx, setHoveredTokenIdx] = useState<number | null>(null);
-  const [temperature, setTemperature] = useState<number>(0.8);
-  const [topK, setTopK] = useState<number>(12);
-  const [topP, setTopP] = useState<number>(0.9);
-  const [copied, setCopied] = useState<boolean>(false);
-  const [busy, setBusy] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
 
-  // Persist exact exploration state in URL
+  const [inputVal, setInputVal] = useState<string>(state.prompt);
+  const [activeTrace, setActiveTrace] = useState<ModelTrace | null>(null);
+  const [engineReady, setEngineReady] = useState<boolean>(false);
+  const [isInferring, setIsInferring] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const clientRef = useRef<TransformerEngineClient | null>(null);
+  const stageRef = useRef<TextbookStage | null>(null);
+  const stageContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Initialize Web Worker Client & Load Weights
   useEffect(() => {
-    const nextSearch = stateToSearch(state);
-    if (window.location.search !== nextSearch) {
-      window.history.replaceState(
-        null,
-        '',
-        `${window.location.pathname}${nextSearch}`
-      );
-    }
-  }, [state]);
-
-  // Mount Three.js Exploded World once
-  useEffect(() => {
-    const el = mountRef.current;
-    if (!el) return;
-
-    const world = new ExplodedWorld(el, {
-      onSelectNode: (nodeId, layer) => {
-        setState((prev) => ({
-          ...prev,
-          nodeId,
-          layer: typeof layer === 'number' ? layer : prev.layer,
-        }));
-      },
-      onHoverToken: (idx) => {
-        setHoveredTokenIdx(idx);
-      },
-    });
-    worldRef.current = world;
-
-    return () => {
-      world.dispose();
-      worldRef.current = null;
-    };
-  }, []);
-
-  // Initialize verified Web Worker + load real weights & training replay
-  useEffect(() => {
+    let unmounted = false;
     const client = new TransformerEngineClient();
     clientRef.current = client;
-    const modelBaseUrl = new URL(
-      `${import.meta.env.BASE_URL}model/`,
-      window.location.origin
-    ).href;
 
-    client
-      .init(modelBaseUrl)
-      .then((info) => setInitInfo(info))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : String(err))
-      );
+    const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+    const weightsUrl = `${base}/model/weights.fp16.bin`;
+    const manifestUrl = `${base}/model/manifest.json`;
+    const tokenizerUrl = `${base}/model/tokenizer.json`;
 
-    fetch(`${modelBaseUrl}training_replay.json`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: TrainingReplayData | null) => {
-        if (data) setReplay(data);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      client.dispose();
-      clientRef.current = null;
-    };
-  }, []);
-
-  // Recompute real forward pass & ablation counterfactual when prompt or ablation changes
-  useEffect(() => {
-    const client = clientRef.current;
-    if (!client || !initInfo) return;
-    let alive = true;
-    setBusy(true);
-    setError(null);
-
-    const run = async () => {
+    async function load() {
       try {
-        const baseRes = await client.trace(state.prompt);
-        if (!alive) return;
-        setBaseline(baseRes);
-
-        if (hasActiveAblation(state.ablation)) {
-          const ablRes = await client.trace(state.prompt, state.ablation);
-          if (!alive) return;
-          setAblated(ablRes);
-        } else {
-          setAblated(null);
+        await client.loadModel(weightsUrl, manifestUrl, tokenizerUrl);
+        if (!unmounted) {
+          setEngineReady(true);
         }
-      } catch (err) {
-        if (alive) {
-          setError(err instanceof Error ? err.message : String(err));
+      } catch (err: unknown) {
+        if (!unmounted) {
+          setErrorMessage(
+            err instanceof Error ? err.message : 'Failed to load model weights'
+          );
         }
-      } finally {
-        if (alive) setBusy(false);
       }
-    };
+    }
 
-    void run();
+    load();
+
     return () => {
-      alive = false;
+      unmounted = true;
+      client.terminate();
     };
-  }, [initInfo, state.prompt, state.ablation]);
+  }, []);
 
-  // Keep 3D exploded scene synced with active node & live trace
+  // Sync state to URL hash/query
   useEffect(() => {
-    if (!worldRef.current || !initInfo || !baseline) return;
-    worldRef.current.update({
-      nodeId: state.nodeId,
-      layer: state.layer,
-      head: state.head,
-      showPreSoftmax: state.showPreSoftmax,
-      ablation: state.ablation,
-      baseline,
-      ablated,
-      tokenizer: initInfo.tokenizer,
-      hoveredTokenIdx,
-      temperature,
-      topK,
-      topP,
-    });
-  }, [
-    initInfo,
-    baseline,
-    ablated,
-    state.nodeId,
-    state.layer,
-    state.head,
-    state.showPreSoftmax,
-    state.ablation,
-    hoveredTokenIdx,
-    temperature,
-    topK,
-    topP,
-  ]);
+    const url = stateToUrl(state);
+    window.history.replaceState(null, '', url);
+  }, [state]);
 
-  // Keyboard shortcuts: Esc zooms up one parent folder, 1/2/3 switches register
+  // Run Inference when prompt, layer, or ablation changes
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'Escape') {
-        setState((prev) => {
-          const cur = getAnatomyNode(prev.nodeId);
-          return cur.parentId ? { ...prev, nodeId: cur.parentId } : prev;
-        });
-      } else if (e.key === '1') {
-        setState((prev) => ({ ...prev, register: 'simple' }));
-      } else if (e.key === '2') {
-        setState((prev) => ({ ...prev, register: 'sufficient' }));
-      } else if (e.key === '3') {
-        setState((prev) => ({ ...prev, register: 'complete' }));
-      }
+    if (!engineReady || !clientRef.current) return;
+
+    let cancelled = false;
+    setIsInferring(true);
+    setErrorMessage(null);
+
+    clientRef.current
+      .run(state.prompt, {
+        ablation: state.ablation,
+        temperature: 0.0,
+      })
+      .then((trace) => {
+        if (!cancelled) {
+          setActiveTrace(trace);
+          setIsInferring(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setIsInferring(false);
+          setErrorMessage(
+            err instanceof Error ? err.message : 'Inference failed'
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [engineReady, state.prompt, state.ablation]);
 
-  const handleSelectNode = useCallback((nodeId: string) => {
-    setState((prev) => ({ ...prev, nodeId }));
-  }, []);
+  // Initialize Three.js Stage
+  useEffect(() => {
+    if (!stageContainerRef.current) return;
+    const stage = new TextbookStage(stageContainerRef.current);
+    stageRef.current = stage;
 
-  const handleChangeRegister = useCallback((register: Register) => {
-    setState((prev) => ({ ...prev, register }));
-  }, []);
-
-  const handleChangeAblation = useCallback((ablation: AblationConfig) => {
-    setState((prev) => ({ ...prev, ablation }));
-  }, []);
-
-  const handleInspectScalar = useCallback(
-    (paramName: string, paramRow: number, paramCol: number) => {
+    stage.setSelectTokenCallback((qIdx, kIdx) => {
       setState((prev) => ({
         ...prev,
-        nodeId: 'scalar',
-        paramName,
-        paramRow,
-        paramCol,
+        queryIdx: qIdx,
+        keyIdx: kIdx,
       }));
-    },
-    []
-  );
+    });
 
-  const handleTogglePreSoftmax = useCallback(() => {
-    setState((prev) => ({
-      ...prev,
-      showPreSoftmax: !prev.showPreSoftmax,
-    }));
+    const handleResize = () => {
+      if (!stageContainerRef.current) return;
+      stage.resize(
+        stageContainerRef.current.clientWidth,
+        stageContainerRef.current.clientHeight
+      );
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      stage.destroy();
+      stageRef.current = null;
+    };
   }, []);
 
-  const handleChangeSampling = useCallback(
-    (patch: { temperature?: number; topK?: number; topP?: number }) => {
-      if (patch.temperature !== undefined) setTemperature(patch.temperature);
-      if (patch.topK !== undefined) setTopK(patch.topK);
-      if (patch.topP !== undefined) setTopP(patch.topP);
-    },
-    []
+  // Update Three.js Stage Content
+  const activeChapter: Chapter = useMemo(
+    () => ALL_CHAPTERS.find((c) => c.id === state.chapterId) ?? ALL_CHAPTERS[3],
+    [state.chapterId]
   );
 
-  const handleStepAutoregressive = useCallback(() => {
-    const active = ablated ?? baseline;
-    if (!active || !initInfo) return;
-    const dist = computeSampledDistribution(
-      active.trace.finalLogits,
-      temperature,
-      topK,
-      topP
-    );
-    const nextId = sampleFromDistribution(dist);
-    const piece = initInfo.tokenizer.vocab[nextId] ?? '';
-    if (!piece || piece === '<|eos|>') return;
-    const nextPrompt = `${state.prompt}${piece}`;
-    setDraftPrompt(nextPrompt);
-    setState((prev) => ({ ...prev, prompt: nextPrompt }));
-  }, [ablated, baseline, initInfo, temperature, topK, topP, state.prompt]);
+  const activeBeat = useMemo(
+    () => activeChapter.beats[state.beatIndex] ?? activeChapter.beats[0],
+    [activeChapter, state.beatIndex]
+  );
 
-  const activeNode = getAnatomyNode(state.nodeId);
-  const activeTrace = ablated ?? baseline;
-  const ablationOn = hasActiveAblation(state.ablation);
+  const activeSceneBeat = activeBeat?.stageFocus ?? 'attn-1-qkv-projection';
 
-  const telemetryLines = useMemo(() => {
-    if (!activeTrace || !initInfo) return [];
-    const { trace, tokens } = activeTrace;
-    const T = tokens.length;
-    const last = T - 1;
-    const topId = trace.greedyNextTokenId;
-    const topTok = formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '');
-    const topProb = (trace.finalProbs[topId] * 100).toFixed(1);
+  useEffect(() => {
+    if (!stageRef.current) return;
+    stageRef.current.update({
+      state,
+      trace: activeTrace,
+      activeSceneBeat,
+    });
+  }, [state, activeTrace, activeSceneBeat]);
 
-    if (activeNode.sceneView === 'embed') {
-      return [
-        `Tokens: ${T} / ${initInfo.manifest.config.max_seq_len} · Last token: "${formatTokenExplicit(tokens[last].text)}" (#${tokens[last].id})`,
-        `||wte|| = ${formatNum(vectorL2Norm(trace.tokEmb[last]), 3)} · ||wpe[${last}]|| = ${formatNum(vectorL2Norm(trace.posEmb[last]), 3)}`,
-      ];
-    }
-
-    const lt = trace.layers[state.layer];
-    if (activeNode.sceneView === 'block') {
-      if (lt.skipped) {
-        return [`Block ${state.layer} is skipped by Ablation Lab (identity pass-through).`];
+  // Keyboard navigation: Left/Right arrow moves between beats
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'TEXTAREA'
+      ) {
+        return;
       }
-      const active: ActiveLayerTrace = lt;
-      return [
-        `Block ${state.layer} · ||h_in||=${formatNum(vectorL2Norm(active.residualBeforeAttn[last]), 2)} → +Attn(${formatNum(vectorL2Norm(active.attn.output[last]), 2)}) → +MLP(${formatNum(vectorL2Norm(active.mlp.output[last]), 2)})`,
-        `||h_out|| = ${formatNum(vectorL2Norm(active.residualAfterMlp[last]), 2)} · shape [${T} × 128]`,
-      ];
-    }
 
-    if (activeNode.sceneView === 'attention') {
-      if (lt.skipped) {
-        return [`Block ${state.layer} is skipped by Ablation Lab.`];
+      if (e.key === 'ArrowRight') {
+        setState((prev) => {
+          const ch = ALL_CHAPTERS.find((c) => c.id === prev.chapterId);
+          if (!ch) return prev;
+          if (prev.beatIndex < ch.beats.length - 1) {
+            return { ...prev, beatIndex: prev.beatIndex + 1 };
+          }
+          return prev;
+        });
+      } else if (e.key === 'ArrowLeft') {
+        setState((prev) => {
+          if (prev.beatIndex > 0) {
+            return { ...prev, beatIndex: prev.beatIndex - 1 };
+          }
+          return prev;
+        });
       }
-      const active: ActiveLayerTrace = lt;
-      const focusIdx = hoveredTokenIdx ?? last;
-      const row = active.attn.attnWeights[state.head][focusIdx];
-      let bestCol = 0;
-      for (let c = 1; c <= focusIdx; c++) {
-        if (row[c] > row[bestCol]) bestCol = c;
-      }
-      const sum = row.reduce((a, b) => a + b, 0);
-      const off = isHeadDisabled(state.ablation, state.layer, state.head);
-      return [
-        `Block ${state.layer} Head ${state.head}${off ? ' (OFF)' : ''} · "${formatTokenExplicit(tokens[focusIdx].text)}" attends most to "${formatTokenExplicit(tokens[bestCol].text)}" (${(row[bestCol] * 100).toFixed(1)}%)`,
-        `Row softmax sum = ${sum.toFixed(6)} · Q, K, V shape [${T} × 32]`,
-      ];
-    }
+    };
 
-    if (activeNode.sceneView === 'mlp') {
-      if (lt.skipped) {
-        return [`Block ${state.layer} is skipped by Ablation Lab.`];
-      }
-      const active: ActiveLayerTrace = lt;
-      const firing = countActiveNeurons(active.mlp.hidden[last], 0.05);
-      return [
-        `Block ${state.layer} MLP · Token "${formatTokenExplicit(tokens[last].text)}": ${firing} / 512 GELU neurons active (>0.05)`,
-        `||Δmlp|| = ${formatNum(vectorL2Norm(active.mlp.output[last]), 2)} · expansion 128 → 512 → 128`,
-      ];
-    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
-    if (activeNode.sceneView === 'output') {
-      const pool = computeSampledDistribution(
-        trace.finalLogits,
-        temperature,
-        topK,
-        topP
-      );
-      return [
-        `Top logit: "${topTok}" z=${formatNum(trace.finalLogits[topId], 2)} → P=${topProb}%`,
-        `Sampling nucleus: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)})`,
-      ];
-    }
-
-    return [
-      `${initInfo.manifest.total_params.toLocaleString()} real params · ${T} tokens · traced in ${activeTrace.elapsedMs}ms`,
-      `Next prediction: "${topTok}" (${topProb}%)${trace.inputLoss !== null ? ` · Prompt loss: ${trace.inputLoss.toFixed(3)}` : ''}`,
-    ];
-  }, [
-    activeTrace,
-    initInfo,
-    activeNode.sceneView,
-    state.layer,
-    state.head,
-    state.ablation,
-    hoveredTokenIdx,
-    temperature,
-    topK,
-    topP,
-  ]);
-
-  const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
+  const handlePromptSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputVal.trim()) return;
+    setState((prev) => ({
+      ...prev,
+      prompt: inputVal.trim(),
+      queryIdx: null,
+      keyIdx: null,
+    }));
   };
 
-  const showBlockSelector =
-    activeNode.sceneView === 'block' ||
-    activeNode.sceneView === 'attention' ||
-    activeNode.sceneView === 'mlp';
+  const handleResetPrompt = () => {
+    setInputVal(DEFAULT_PROMPT);
+    setState((prev) => ({
+      ...prev,
+      prompt: DEFAULT_PROMPT,
+      queryIdx: null,
+      keyIdx: null,
+    }));
+  };
+
+  const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
+
+  const resolvedQueryIdx = Math.max(
+    0,
+    Math.min(
+      (activeTrace?.tokens.length ?? 1) - 1,
+      state.queryIdx ?? (activeTrace?.tokens.length ?? 1) - 1
+    )
+  );
+
+  const resolvedKeyIdx = Math.max(
+    0,
+    Math.min((activeTrace?.tokens.length ?? 1) - 1, state.keyIdx ?? resolvedQueryIdx)
+  );
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <button
-          type="button"
-          className="brand-btn"
-          onClick={() => handleSelectNode('root')}
-          title="Zoom out to the complete LLM"
-        >
-          LLM Atlas
-        </button>
+    <div className="app-root">
+      {/* Top Header Bar */}
+      <header className="top-nav">
+        <div className="brand-section">
+          <span className="brand-title">LLM Atlas</span>
+          <span className="brand-badge">Interactive Textbook</span>
+        </div>
 
-        <form
-          className="prompt-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!draftPrompt.trim()) return;
-            setState((prev) => ({ ...prev, prompt: draftPrompt }));
-          }}
-        >
+        <form className="top-prompt-area" onSubmit={handlePromptSubmit}>
           <input
-            className="prompt-input"
-            value={draftPrompt}
-            onChange={(e) => setDraftPrompt(e.target.value)}
-            placeholder="Type any sentence to trace live..."
-            aria-label="Prompt sentence"
+            type="text"
+            className="prompt-input mono"
+            value={inputVal}
+            onChange={(e) => setInputVal(e.target.value)}
+            placeholder="Type any prompt..."
           />
-          <select
-            className="preset-select"
-            value=""
-            aria-label="Example prompts"
-            onChange={(e) => {
-              const p = PRESET_PROMPTS.find((x) => x.id === e.target.value);
-              if (!p) return;
-              setDraftPrompt(p.text);
-              setState((prev) => ({ ...prev, prompt: p.text }));
-            }}
+          <button
+            type="submit"
+            className="btn-run"
+            disabled={!engineReady || isInferring}
           >
-            <option value="">Examples...</option>
-            {PRESET_PROMPTS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-          <button type="submit" className="primary-btn" disabled={busy || !initInfo}>
-            {busy ? 'Tracing...' : 'Run'}
+            {isInferring ? 'Thinking...' : 'Run'}
           </button>
+          {inputVal !== DEFAULT_PROMPT && (
+            <button
+              type="button"
+              className="btn-mode"
+              onClick={handleResetPrompt}
+            >
+              Reset Prompt
+            </button>
+          )}
         </form>
 
-        <div className="topbar-actions">
+        <div className="top-actions">
           <button
             type="button"
-            className={`mini-btn ${ablationOn ? 'is-warm' : state.nodeId === 'ablation' ? 'is-active' : ''}`}
-            onClick={() => handleSelectNode('ablation')}
+            className={`btn-mode ${state.lectureMode ? 'is-active' : ''}`}
+            onClick={() =>
+              setState((prev) => ({ ...prev, lectureMode: !prev.lectureMode }))
+            }
           >
-            {ablationOn ? 'Ablation (on)' : 'Ablate'}
+            {state.lectureMode ? 'Exit Lecture Mode' : 'Lecture Mode'}
           </button>
-          <button
-            type="button"
-            className="mini-btn"
-            onClick={() => void copyLink()}
+
+          <a
+            href="https://github.com/ageanton/llm-atlas"
+            target="_blank"
+            rel="noreferrer"
+            className="btn-mode"
           >
-            {copied ? 'Copied' : 'Share'}
-          </button>
+            GitHub
+          </a>
         </div>
       </header>
 
-      <div className="split-workspace">
-        <section className="stage-pane" aria-label="Interactive 3D exploded LLM">
-          <div ref={mountRef} className="canvas-mount" />
+      {/* Main Workspace */}
+      <div className={`main-workspace ${state.lectureMode ? 'is-lecture' : ''}`}>
+        {/* Left Pane: Book Reader */}
+        {!state.lectureMode && (
+          <aside className="reader-pane">
+            <BookReader
+              state={state}
+              trace={activeTrace}
+              onUpdateState={setState}
+            />
+          </aside>
+        )}
 
-          {!initInfo && !error && (
-            <div className="loading-overlay">
-              Loading 862,464 real trained parameters...
-            </div>
-          )}
-          {error && <div className="error-banner">{error}</div>}
+        {/* Right Pane: 3D Textbook Stage */}
+        <section className="stage-pane" aria-label="3D Interactive Stage">
+          <div ref={stageContainerRef} className="three-stage-canvas-container" />
 
+          {/* Stage HUD Top */}
           <div className="stage-hud-top">
-            <div className="stage-pill-group">
-              {state.nodeId !== 'root' && (
+            <div className="hud-group">
+              <span className="hud-label">Layer</span>
+              {[0, 1, 2, 3].map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  className={`mini-btn mono ${state.layer === l ? 'is-active' : ''}`}
+                  onClick={() => setState((prev) => ({ ...prev, layer: l }))}
+                >
+                  {l}
+                </button>
+              ))}
+
+              <span className="hud-label">Head</span>
+              {[0, 1, 2, 3].map((h) => {
+                const off = isHeadDisabled(state.ablation, state.layer, h);
+                return (
+                  <button
+                    key={h}
+                    type="button"
+                    className={`mini-btn mono ${
+                      off ? 'is-warm' : state.head === h ? 'is-active' : ''
+                    }`}
+                    onClick={() => setState((prev) => ({ ...prev, head: h }))}
+                  >
+                    H{h}
+                  </button>
+                );
+              })}
+
+              {activeSceneBeat === 'attn-4-mask-softmax' && (\n                <button\n                  type=\"button\"\n                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}\n                  onClick={() =>\n                    setState((prev) => ({\n                      ...prev,\n                      showPreSoftmax: !prev.showPreSoftmax,\n                    }))\n                  }\n                >\n                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}\n                </button>\n              )}
+
+              {(activeSceneBeat === 'attn-5-value-mixer' ||
+                activeSceneBeat === 'attn-6-multihead-full') && (
                 <button
                   type="button"
-                  className="mini-btn"
-                  onClick={() => handleSelectNode('root')}
+                  className={`mini-btn ${headOff ? 'is-warm' : ''}`}
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      ablation: toggleHeadDisabled(
+                        prev.ablation,
+                        prev.layer,
+                        prev.head
+                      ),
+                    }))
+                  }
                 >
-                  Zoom Out (Full LLM)
+                  {headOff ? `Re-enable H${state.head}` : `Disable H${state.head}`}
                 </button>
-              )}
-
-              {showBlockSelector && (
-                <>
-                  <span className="stage-pill-label">Block</span>
-                  {[0, 1, 2, 3].map((l) => (
-                    <button
-                      key={l}
-                      type="button"
-                      className={`mini-btn mono ${state.layer === l ? 'is-active' : ''}`}
-                      onClick={() => setState((prev) => ({ ...prev, layer: l }))}
-                    >
-                      {l}
-                    </button>
-                  ))}
-                </>
-              )}
-
-              {activeNode.sceneView === 'attention' && (
-                <>
-                  <span className="stage-pill-label">Head</span>
-                  {[0, 1, 2, 3].map((h) => {
-                    const off = isHeadDisabled(state.ablation, state.layer, h);
-                    return (
-                      <button
-                        key={h}
-                        type="button"
-                        className={`mini-btn mono ${
-                          off ? 'is-warm' : state.head === h ? 'is-active' : ''
-                        }`}
-                        onClick={() => setState((prev) => ({ ...prev, head: h }))}
-                      >
-                        H{h}
-                      </button>
-                    );
-                  })}
-                </>
               )}
             </div>
 
-            {ablationOn && (
-              <div className="stage-pill-group">
-                <span className="stage-pill-label">Ablation active</span>
+            <div className="hud-group">
+              {hasActiveAblation(state.ablation) && (
                 <button
                   type="button"
                   className="mini-btn is-warm"
-                  onClick={() => handleChangeAblation({})}
+                  onClick={() => setState((prev) => ({ ...prev, ablation: {} }))}
                 >
-                  Reset
+                  Reset Ablation
                 </button>
-              </div>
-            )}
+              )}
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => stageRef.current?.resetCamera()}
+              >
+                Reset View
+              </button>
+            </div>
           </div>
 
           {activeTrace && (
             <div className="stage-hud-bottom">
-              <div className="token-strip-float" aria-label="Prompt tokens">
-                {activeTrace.tokens.map((tok, idx) => (
-                  <button
-                    key={`${tok.start}-${idx}`}
-                    type="button"
-                    className={`tok-badge mono ${
-                      hoveredTokenIdx === idx ? 'is-hover' : ''
-                    }`}
-                    onMouseEnter={() => setHoveredTokenIdx(idx)}
-                    onMouseLeave={() => setHoveredTokenIdx(null)}
-                    title={`Slot ${idx} · Token #${tok.id}`}
-                  >
-                    {formatToken(tok.text)}
-                  </button>
-                ))}
+              <div className="token-bar" aria-label="Select Query or Key token">
+                <span className="hud-label">
+                  {activeSceneBeat === 'attn-2-dot-product'
+                    ? 'Compare Key:'
+                    : 'Query Token:'}
+                </span>
+                {activeTrace.tokens.map((tok, idx) => {
+                  const isQ = idx === resolvedQueryIdx;
+                  const isK =
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx === resolvedKeyIdx;
+                  const disabledKey =
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx > resolvedQueryIdx;
+                  return (
+                    <button
+                      key={`${tok.start}-${idx}`}
+                      type="button"
+                      disabled={disabledKey}
+                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${
+                        isK ? 'is-key' : ''
+                      }`}
+                      onClick={() =>
+                        setState((prev) =>
+                          activeSceneBeat === 'attn-2-dot-product'
+                            ? { ...prev, keyIdx: idx }
+                            : { ...prev, queryIdx: idx, keyIdx: null }
+                        )
+                      }
+                    >
+                      {formatToken(tok.text)}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="camera-hint">
+                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
               </div>
             </div>
           )}
         </section>
-
-        {initInfo && baseline && clientRef.current ? (
-          <AnatomyInspector
-            nodeId={state.nodeId}
-            register={state.register}
-            telemetryLines={telemetryLines}
-            client={clientRef.current}
-            manifest={initInfo.manifest}
-            tokenizer={initInfo.tokenizer}
-            baseline={baseline}
-            ablated={ablated}
-            ablation={state.ablation}
-            layer={state.layer}
-            head={state.head}
-            showPreSoftmax={state.showPreSoftmax}
-            hoveredTokenIdx={hoveredTokenIdx}
-            replay={replay}
-            paramName={state.paramName}
-            paramRow={state.paramRow}
-            paramCol={state.paramCol}
-            temperature={temperature}
-            topK={topK}
-            topP={topP}
-            busy={busy}
-            onSelectNode={handleSelectNode}
-            onChangeRegister={handleChangeRegister}
-            onChangeAblation={handleChangeAblation}
-            onInspectScalar={handleInspectScalar}
-            onTogglePreSoftmax={handleTogglePreSoftmax}
-            onHoverToken={setHoveredTokenIdx}
-            onChangeSampling={handleChangeSampling}
-            onStepAutoregressive={handleStepAutoregressive}
-          />
-        ) : (
-          <aside className="inspector-rail">
-            <div className="inspector-scroll muted-sm">
-              Initializing verified miniature transformer engine...
-            </div>
-          </aside>
-        )}
       </div>
     </div>
   );
