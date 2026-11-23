@@ -105,20 +105,16 @@ export function stateFromUrl(search: string): BookState {
   const beatIndex = clampInt(Number(params.get('beat') ?? '0'), 0, 5);
   const edition = parseEdition(params.get('ed'));
   const layer = clampInt(Number(params.get('block') ?? '2'), 0, 3);
-  const head = clampInt(Number(params.get('head') ?? '0'), 0, 3);
-  const queryIdxRaw = params.get('q');
+  const head = clampInt(Number(params.get('head') ?? '3'), 0, 3);
+  const qRaw = params.get('q');
+  const kRaw = params.get('k');
   const queryIdx =
-    queryIdxRaw !== null && queryIdxRaw !== ''
-      ? clampInt(Number(queryIdxRaw), 0, 63)
-      : null;
-  const keyIdxRaw = params.get('k');
+    qRaw !== null && Number.isFinite(Number(qRaw)) ? Number(qRaw) : null;
   const keyIdx =
-    keyIdxRaw !== null && keyIdxRaw !== ''
-      ? clampInt(Number(keyIdxRaw), 0, 63)
-      : null;
-  const showPreSoftmax = params.get('presoft') === '1';
-  const lectureMode = params.get('mode') === 'lecture';
+    kRaw !== null && Number.isFinite(Number(kRaw)) ? Number(kRaw) : null;
+  const showPreSoftmax = params.get('raw') === '1';
   const ablation = paramToAblation(params.get('abl'));
+  const lectureMode = params.get('mode') === 'lecture';
 
   return {
     prompt,
@@ -137,15 +133,15 @@ export function stateFromUrl(search: string): BookState {
 
 export function stateToSearch(state: BookState): string {
   const params = new URLSearchParams();
-  if (state.prompt !== DEFAULT_PROMPT) params.set('in', state.prompt);
+  params.set('in', state.prompt);
   params.set('ch', String(state.chapterId));
   params.set('beat', String(state.beatIndex));
-  if (state.edition !== 'foundations') params.set('ed', state.edition);
-  if (state.layer !== 2) params.set('block', String(state.layer));
-  if (state.head !== 0) params.set('head', String(state.head));
+  params.set('ed', state.edition);
+  params.set('block', String(state.layer));
+  params.set('head', String(state.head));
   if (state.queryIdx !== null) params.set('q', String(state.queryIdx));
   if (state.keyIdx !== null) params.set('k', String(state.keyIdx));
-  if (state.showPreSoftmax) params.set('presoft', '1');
+  if (state.showPreSoftmax) params.set('raw', '1');
   if (hasActiveAblation(state.ablation)) {
     params.set('abl', ablationToParam(state.ablation));
   }

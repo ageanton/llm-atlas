@@ -4,168 +4,188 @@ import {
   type BookBeat,
   type ChapterMeta,
 } from '../content/bookData';
+import type { Edition } from '../state/bookState';
 import { PredictCard } from './PredictCard';
-import type { BookState, Edition } from '../state/bookState';
-import { formatToken } from '../utils/math';
-import type { EngineTraceResult } from '../engine/types';
+
+const EDITIONS: Edition[] = ['foundations', 'practitioner', 'formal'];
 
 interface BookReaderProps {
-  state: BookState;
-  trace: EngineTraceResult | null;
-  onUpdateState: (fn: (prev: BookState) => BookState) => void;
-  onOpenContents?: () => void;
+  chapter: ChapterMeta;
+  beat: BookBeat | null;
+  beatIndex: number;
+  edition: Edition;
+  showContents: boolean;
+  liveCardLines: string[];
+  onToggleContents: () => void;
+  onSelectChapter: (chapterId: number) => void;
+  onSelectBeat: (beatIndex: number) => void;
+  onChangeEdition: (edition: Edition) => void;
 }
 
 export function BookReader({
-  state,
-  trace,
-  onUpdateState,
-  onOpenContents,
+  chapter,
+  beat,
+  beatIndex,
+  edition,
+  showContents,
+  liveCardLines,
+  onToggleContents,
+  onSelectChapter,
+  onSelectBeat,
+  onChangeEdition,
 }: BookReaderProps) {
-  const currentChapter: ChapterMeta =
-    TEXTBOOK_CHAPTERS.find((c) => c.id === state.chapterId) ??
-    TEXTBOOK_CHAPTERS[3];
-
-  const currentBeat: BookBeat | undefined =
-    currentChapter.beats[state.beatIndex] ?? currentChapter.beats[0];
-
-  const edition = state.edition;
-
-  const handleSelectEdition = (ed: Edition) => {
-    onUpdateState((prev) => ({ ...prev, edition: ed }));
-  };
-
-  const handleSelectBeat = (idx: number) => {
-    onUpdateState((prev) => ({
-      ...prev,
-      beatIndex: idx,
-    }));
-  };
+  const totalBeats = chapter.beats.length;
 
   return (
-    <aside className="book-reader-pane">
-      <header className="reader-header">
-        <div className="reader-chapter-badge">
+    <aside className="book-pane" aria-label="Interactive LLM Textbook">
+      <div className="book-header">
+        <div className="book-header-top">
           <button
             type="button"
-            className="chapter-indicator-btn"
-            onClick={onOpenContents}
-            title="Open Table of Contents"
+            className={`outline-btn ${showContents ? 'is-active' : ''}`}
+            onClick={onToggleContents}
           >
-            Chapter {currentChapter.id}: {currentChapter.title} ▾
+            {showContents ? 'Back to Chapter' : `Contents (Ch. ${chapter.id} of 8)`}
           </button>
-        </div>
 
-        <div className="edition-selector" role="tablist" aria-label="Book Edition">
-          {(['foundations', 'practitioner', 'formal'] as Edition[]).map(
-            (ed) => (
+          <div className="edition-switch" role="group" aria-label="Academic edition">
+            {EDITIONS.map((ed) => (
               <button
                 key={ed}
-                role="tab"
-                aria-selected={edition === ed}
-                className={`edition-tab ${edition === ed ? 'is-active' : ''}`}
-                onClick={() => handleSelectEdition(ed)}
+                type="button"
+                className={`ed-btn ${edition === ed ? 'is-active' : ''}`}
+                onClick={() => onChangeEdition(ed)}
               >
                 {editionLabel(ed)}
               </button>
-            )
-          )}
+            ))}
+          </div>
         </div>
-      </header>
 
-      {/* Beat Stepper Ribbon */}
-      <nav className="beat-nav" aria-label="Chapter Beats">
-        {currentChapter.beats.map((b, idx) => (
-          <button
-            key={b.id}
-            type="button"
-            className={`beat-step ${state.beatIndex === idx ? 'is-active' : ''}`}
-            onClick={() => handleSelectBeat(idx)}
-          >
-            <span className="beat-num">{b.beatNumber}</span>
-            <span className="beat-name">{b.shortName}</span>
-          </button>
-        ))}
-      </nav>
-
-      {/* Main Beat Content */}
-      <div className="reader-scroll-body">
-        {currentBeat && (
-          <article className="beat-content">
-            <header className="beat-hero">
-              <span className="beat-kicker">
-                Beat {currentBeat.beatNumber} of {currentChapter.beats.length}
-              </span>
-              <h1 className="beat-title">{currentBeat.title}</h1>
-              <p className="beat-subtitle">{currentBeat.subtitle}</p>
-            </header>
-
-            <div className="interactive-cue-card">
-              <span className="cue-label">Direct Inspection</span>
-              <p className="cue-text">{currentBeat.inspectInstructions}</p>
-            </div>
-
-            {/* Prediction Challenge */}
-            {currentBeat.prediction && (
-              <PredictCard challenge={currentBeat.prediction} />
-            )}
-
-            {/* Register Summary */}
-            <section className="register-section">
-              <h2 className="register-heading">
-                {edition === 'foundations' && 'Intuition & Mechanics'}
-                {edition === 'practitioner' && 'Implementation & Tensors'}
-                {edition === 'formal' && 'Formal Definition & Math'}
-              </h2>
-              <p className="register-body-text">
-                {currentBeat.summary[edition]}
-              </p>
-            </section>
-
-            {/* LaTeX Math Formula */}
-            {edition === 'formal' && currentBeat.equationLatex && (
-              <div className="math-display">
-                <code>{currentBeat.equationLatex}</code>
-              </div>
-            )}
-
-            {/* PyTorch Code */}
-            {edition === 'practitioner' && currentBeat.codeBlock && (
-              <pre className="code-display">
-                <code>{currentBeat.codeBlock}</code>
-              </pre>
-            )}
-
-            {/* Deep Dive */}
-            <section className="deep-dive-section">
-              <h3 className="deep-dive-heading">Under the Hood</h3>
-              <p className="deep-dive-text">{currentBeat.deepDive[edition]}</p>
-            </section>
-          </article>
+        {!showContents && totalBeats > 0 && (
+          <nav className="beat-stepper" aria-label="Chapter beats">
+            {chapter.beats.map((b, idx) => (
+              <button
+                key={b.id}
+                type="button"
+                className={`beat-pill ${idx === beatIndex ? 'is-current' : ''}`}
+                onClick={() => onSelectBeat(idx)}
+              >
+                {b.shortTitle}
+              </button>
+            ))}
+          </nav>
         )}
       </div>
 
-      {/* Footer Navigation */}
-      <div className="reader-footer-nav">
-        <button
-          type="button"
-          className="nav-btn"
-          disabled={state.beatIndex <= 0}
-          onClick={() => handleSelectBeat(state.beatIndex - 1)}
-        >
-          ← Previous Beat
-        </button>
-        <span className="nav-counter">
-          {state.beatIndex + 1} / {currentChapter.beats.length}
-        </span>
-        <button
-          type="button"
-          className="nav-btn is-primary"
-          disabled={state.beatIndex >= currentChapter.beats.length - 1}
-          onClick={() => handleSelectBeat(state.beatIndex + 1)}
-        >
-          Next Beat →
-        </button>
+      <div className="book-scroll">
+        {showContents ? (
+          <div className="toc-list">
+            <div className="toc-intro">
+              <div className="chapter-kicker">8-Chapter Interactive Curriculum</div>
+              <h1 className="toc-heading">Inventing the Transformer from Scratch</h1>
+              <p className="book-para">
+                Every chapter opens with a concrete bottleneck on a real sentence, lets you test why the machine needs a new mechanism, and drives the live 3D simulation one step at a time.
+              </p>
+            </div>
+
+            {TEXTBOOK_CHAPTERS.map((ch) => (
+              <button
+                key={ch.id}
+                type="button"
+                className={`toc-item ${ch.id === chapter.id ? 'is-current' : ''}`}
+                onClick={() => onSelectChapter(ch.id)}
+              >
+                <div className="toc-item-top">
+                  <span className="toc-num mono">Ch. {ch.id}</span>
+                  <span
+                    className={`toc-status ${
+                      ch.status === 'ready' ? 'is-live' : 'is-upcoming'
+                    }`}
+                  >
+                    {ch.status === 'ready' ? 'Live Interactive' : 'Pass 2 / 3'}
+                  </span>
+                </div>
+                <div className="toc-title">{ch.title}</div>
+                <div className="toc-sub">{ch.subtitle}</div>
+              </button>
+            ))}
+          </div>
+        ) : chapter.status === 'upcoming' || !beat ? (
+          <div className="upcoming-chapter">
+            <div className="chapter-kicker">Chapter {chapter.id} of 8</div>
+            <h1 className="chapter-title">{chapter.title}</h1>
+            <p className="chapter-sub">{chapter.subtitle}</p>
+            <div className="mystery-box">
+              <div className="mystery-label">Opening Mystery</div>
+              <p>{chapter.openingMystery}</p>
+            </div>
+            <p className="book-para">
+              This chapter is scheduled in Build Pass 2 &amp; 3 once we lock the teaching quality of our flagship Chapter 4 engine.
+            </p>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => onSelectChapter(4)}
+            >
+              Open Flagship Chapter 4: Self-Attention
+            </button>
+          </div>
+        ) : (
+          <article className="beat-article" aria-live="polite">
+            <div className="chapter-kicker">
+              Chapter {chapter.id} · Beat {beat.beatNumber} of {totalBeats}
+            </div>
+            <h1 className="beat-heading">{beat.heading}</h1>
+
+            <div className="stage-cue">{beat.visualFocusNote}</div>
+
+            {beat.paragraphs[edition].map((para, i) => (
+              <p key={i} className="book-para">
+                {para}
+              </p>
+            ))}
+
+            {liveCardLines.length > 0 && (
+              <div className="live-proof-box mono">
+                <div className="live-proof-title">Live Numbers From Your Sentence</div>
+                {liveCardLines.map((line, i) => (
+                  <div key={i} className="live-proof-line">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="takeaway-box">
+              <span className="takeaway-label">Core Takeaway</span>
+              <p>{beat.keyTakeaway[edition]}</p>
+            </div>
+
+            {beat.predict && <PredictCard challenge={beat.predict} />}
+
+            <div className="beat-footer-nav">
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={beatIndex <= 0}
+                onClick={() => onSelectBeat(beatIndex - 1)}
+              >
+                ← Previous Beat
+              </button>
+              <button
+                type="button"
+                className="primary-btn"
+                disabled={beatIndex >= totalBeats - 1}
+                onClick={() => onSelectBeat(beatIndex + 1)}
+              >
+                {beatIndex < totalBeats - 1
+                  ? `Next: ${chapter.beats[beatIndex + 1].shortTitle} →`
+                  : 'End of Chapter 4'}
+              </button>
+            </div>
+          </article>
+        )}
       </div>
     </aside>
   );

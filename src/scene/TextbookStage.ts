@@ -3,724 +3,778 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import type { SceneBeatId } from '../content/bookData';
-import type { ActiveLayerTrace, EngineTraceResult } from '../engine/types';
-import type { BookState } from '../state/bookState';
+import type {
+  AblationConfig,
+  ActiveLayerTrace,
+  EngineTraceResult,
+} from '../engine/types';
+import { isHeadDisabled } from '../state/bookState';
 import {
   computeDotProductBreakdown,
+  createLabelSpriteTexture,
   divergingColor,
   formatNum,
   formatToken,
-  makeTextSprite,
   sequentialColor,
-  threeDivergingColor,
-  threeSequentialColor,
 } from '../utils/math';
 
-export interface StageRenderData {
-  state: BookState;
-  trace: EngineTraceResult | null;
-  activeBeatId: SceneBeatId;
+export interface StageCallbacks {
+  onPickToken: (index: number) => void;
+  onPickHead: (head: number) => void;
+}
+
+export interface StageSnapshot {
+  beat: SceneBeatId;
+  layer: number;
+  head: number;
+  queryIdx: number;
+  keyIdx: number;
+  showPreSoftmax: boolean;
+  ablation: AblationConfig;
+  traceRes: EngineTraceResult;
+}
+
+interface ClickTag {
+  kind: 'token' | 'head';
+  index: number;
 }
 
 export class TextbookStage {
-  private container: HTMLDivElement;
-  private renderer: THREE.WebGLRenderer;
-  private scene: THREE.Scene;
-  private camera: THREE.PerspectiveCamera;
-  private controls: OrbitControls;
-  private contentGroup: THREE.Group;
-  private animFrameId: number | null = null;
-  private pmremGenerator: THREE.PMREMGenerator;
-  private envRT: THREE.WebGLRenderTarget;
+  private readonly container: HTMLElement;
+  private readonly callbacks: StageCallbacks;
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene: THREE.Scene;
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly controls: OrbitControls;
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2(-10, -10);
+  private readonly envRT: THREE.WebGLRenderTarget;
 
-  private currentData: StageRenderData | null = null;
-  private onSelectTokenCb?: (queryIdx: number, keyIdx: number | null) => void;
+  private readonly stageRoot = new THREE.Group();
+  private interactives: THREE.Object3D[] = [];
+  private disposableTextures: THREE.Texture[] = [];
+  private disposableGeometries: THREE.BufferGeometry[] = [];
+  private disposableMaterials: THREE.Material[] = [];
 
-  constructor(container: HTMLDivElement) {
+  private camTargetPos = new THREE.Vector3(0, 3.6, 10.5);
+  private camTargetLook = new THREE.Vector3(0, 0.2, 0);
+
+  constructor(container: HTMLElement, callbacks: StageCallbacks) {
     this.container = container;
+    this.callbacks = callbacks;
 
-    const width = Math.max(10, container.clientWidth);
-    const height = Math.max(10, container.clientHeight);
+    const width = Math.max(container.clientWidth, 320);
+    const height = Math.max(container.clientHeight, 240);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xf6f8fb);
+    this.scene.background = new THREE.Color(0xf6f8fc);
 
-    this.camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 1000);
-    this.camera.position.set(0, 16, 32);
+    this.camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
+    this.camera.position.set(0, 4.2, 11);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.toneMappingExposure = 1.05;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
     container.appendChild(this.renderer.domElement);
 
-    this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
-    this.pmremGenerator.compileEquirectangularShader();
-    const room = new RoomEnvironment();
-    this.envRT = this.pmremGenerator.fromScene(room, 0.04);
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    pmrem.compileEquirectangularShader();
+    const envScene = new RoomEnvironment();
+    this.envRT = pmrem.fromScene(envScene, 0.04);
     this.scene.environment = this.envRT.texture;
+    envScene.dispose();
+    pmrem.dispose();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
-    this.controls.target.set(0, 0, 0);
-    this.controls.maxDistance = 120;
-    this.controls.minDistance = 6;
+    this.controls.dampingFactor = 0.06;
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.02;
+    this.controls.minDistance = 2.5;
+    this.controls.maxDistance = 28;
+    this.controls.target.set(0, 0.2, 0);
 
-    this.contentGroup = new THREE.Group();
-    this.scene.add(this.contentGroup);
+    this.initLighting();
+    this.initGround();
+    this.scene.add(this.stageRoot);
 
-    this.setupLighting();
-    this.setupGround();
-    this.startLoop();
+    this.renderer.domElement.addEventListener('pointermove', this.handlePointerMove);
+    this.renderer.domElement.addEventListener('click', this.handleClick);
+
+    this.animate();
   }
 
-  public setSelectTokenCallback(
-    cb: (queryIdx: number, keyIdx: number | null) => void
-  ) {
-    this.onSelectTokenCb = cb;
-  }
-
-  private setupLighting() {
-    const hemi = new THREE.HemisphereLight(0xffffff, 0xe2e8f0, 0.85);
-    this.scene.add(hemi);
-
-    const sun = new THREE.DirectionalLight(0xfffaed, 1.25);
-    sun.position.set(20, 36, 24);
+  private initLighting(): void {
+    const sun = new THREE.DirectionalLight(0xfff7ed, 1.4);
+    sun.position.set(7, 14, 8);
     sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 100;
-    const d = 26;
-    sun.shadow.camera.left = -d;
-    sun.shadow.camera.right = d;
-    sun.shadow.camera.top = d;
-    sun.shadow.camera.bottom = -d;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 30;
+    sun.shadow.camera.left = -9;
+    sun.shadow.camera.right = 9;
+    sun.shadow.camera.top = 9;
+    sun.shadow.camera.bottom = -9;
     sun.shadow.bias = -0.0004;
     this.scene.add(sun);
 
-    const fill = new THREE.DirectionalLight(0xe0f2fe, 0.45);
-    fill.position.set(-18, 14, -16);
-    this.scene.add(fill);
+    const sky = new THREE.HemisphereLight(0xffffff, 0xe2e8f0, 0.65);
+    this.scene.add(sky);
   }
 
-  private setupGround() {
-    const groundGeo = new THREE.PlaneGeometry(160, 160);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xf0f3f8,
-      roughness: 0.95,
+  private initGround(): void {
+    const geo = new THREE.PlaneGeometry(60, 60);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xf1f5f9,
+      roughness: 0.96,
       metalness: 0.02,
     });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.01;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = -0.02;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
 
-    const grid = new THREE.GridHelper(100, 50, 0xd8e0ea, 0xeef3f8);
+    const grid = new THREE.GridHelper(40, 40, 0xd8e2ed, 0xe2e8f0);
     grid.position.y = 0;
     this.scene.add(grid);
   }
 
-  public resize(width: number, height: number) {
+  public render(snap: StageSnapshot): void {
+    this.clearDynamicScene();
+
+    switch (snap.beat) {
+      case 'attn-1-problem':
+        this.renderBeat1QKV(snap);
+        break;
+      case 'attn-2-dot-product':
+        this.renderBeat2DotProduct(snap);
+        break;
+      case 'attn-3-scan-row':
+        this.renderBeat3ScanRow(snap);
+        break;
+      case 'attn-4-mask-softmax':
+        this.renderBeat4MaskSoftmax(snap);
+        break;
+      case 'attn-5-value-mixer':
+        this.renderBeat5ValueMixer(snap);
+        break;
+      case 'attn-6-multihead-full':
+        this.renderBeat6Multihead(snap);
+        break;
+    }
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 1: Addressing Problem & Q, K, V Projections
+  // -------------------------------------------------------------
+  private renderBeat1QKV(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 3.8, 10.5), new THREE.Vector3(0, 0.3, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const tok = snap.traceRes.tokens[qIdx];
+
+    const qVec = layer.attn.q[snap.head][qIdx] ?? [];
+    const kVec = layer.attn.k[snap.head][qIdx] ?? [];
+    const vVec = layer.attn.v[snap.head][qIdx] ?? [];
+
+    this.createStageBanner(
+      `Token ${qIdx}: "${formatToken(tok.text)}" · Head ${snap.head} Projections`,
+      'One 64-d residual vector linearly splits into three 16-d search & transport roles',
+      new THREE.Vector3(0, 4.3, -1)
+    );
+
+    // Render Q, K, V as three distinct columns of 16 dimensional slabs
+    this.renderVectorTower(
+      qVec,
+      'Query (Q)',
+      'What I Seek',
+      new THREE.Vector3(-3.2, 0, 0),
+      '#1d4ed8'
+    );
+    this.renderVectorTower(
+      kVec,
+      'Key (K)',
+      'What I Advertise',
+      new THREE.Vector3(0, 0, 0),
+      '#059669'
+    );
+    this.renderVectorTower(
+      vVec,
+      'Value (V)',
+      'What I Transport',
+      new THREE.Vector3(3.2, 0, 0),
+      '#d97706'
+    );
+
+    // Floor origin node showing the input residual token
+    this.renderInputTokenPuck(tok.text, qIdx, new THREE.Vector3(0, 0, 3.2));
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 2: One Comparison — The 16-d Dot Product
+  // -------------------------------------------------------------
+  private renderBeat2DotProduct(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 3.5, 9.8), new THREE.Vector3(0, 0.4, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const kIdx = clampIndex(snap.keyIdx, numTokens);
+
+    const qVec = layer.attn.q[snap.head][qIdx] ?? [];
+    const kVec = layer.attn.k[snap.head][kIdx] ?? [];
+    const tokQ = snap.traceRes.tokens[qIdx];
+    const tokK = snap.traceRes.tokens[kIdx];
+
+    const breakdown = computeDotProductBreakdown(qVec, kVec);
+
+    this.createStageBanner(
+      `Q("${formatToken(tokQ.text)}") · K("${formatToken(tokK.text)}")`,
+      `Raw Dot = ${formatNum(breakdown.rawDot)} · Scaled (÷4) = ${formatNum(breakdown.scaledScore)}`,
+      new THREE.Vector3(0, 4.2, -1)
+    );
+
+    // Render 16 horizontal product rods side-by-side
+    const rodGroup = new THREE.Group();
+    const rodWidth = 0.28;
+    const spacing = 0.38;
+    const startX = -((16 * spacing) / 2);
+
+    for (let c = 0; c < 16; c++) {
+      const prod = breakdown.products[c];
+      const isPos = prod >= 0;
+      const h = Math.max(0.08, Math.min(2.4, Math.abs(prod) * 1.6));
+
+      const geo = new RoundedBoxGeometry(rodWidth, h, rodWidth, 2, 0.05);
+      const mat = new THREE.MeshStandardMaterial({
+        color: isPos ? 0x2563eb : 0xd97706,
+        roughness: 0.3,
+        metalness: 0.08,
+      });
+      this.trackDisposable(geo, mat);
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.position.set(startX + c * spacing, h / 2, 0);
+      rodGroup.add(mesh);
+    }
+    this.stageRoot.add(rodGroup);
+
+    // Ground labels for Query and Key
+    this.renderTokenPill(
+      `Query [${qIdx}]: ${formatToken(tokQ.text)}`,
+      new THREE.Vector3(-2.8, 0.02, 2.2),
+      '#1d4ed8'
+    );
+    this.renderTokenPill(
+      `Key [${kIdx}]: ${formatToken(tokK.text)}`,
+      new THREE.Vector3(2.8, 0.02, 2.2),
+      '#059669'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 3: Row Scan & The 1/√d Scale
+  // -------------------------------------------------------------
+  private renderBeat3ScanRow(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 4.2, 11.5), new THREE.Vector3(0, 0.5, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const tokQ = snap.traceRes.tokens[qIdx];
+    const preRow = layer.attn.preSoftmax[snap.head][qIdx] ?? [];
+
+    this.createStageBanner(
+      `Scanning Past Words for "${formatToken(tokQ.text)}"`,
+      snap.showPreSoftmax
+        ? 'Showing RAW unscaled dot products (extreme variance)'
+        : 'Showing SCALED dot products (divided by √16 = 4.0)',
+      new THREE.Vector3(0, 4.4, -1)
+    );
+
+    const step = 0.65;
+    const startX = -((numTokens * step) / 2);
+
+    for (let j = 0; j < numTokens; j++) {
+      const isMasked = j > qIdx;
+      const tok = snap.traceRes.tokens[j];
+      const scaledVal = preRow[j] ?? -9999;
+      const rawVal = scaledVal * 4;
+      const displayVal = snap.showPreSoftmax ? rawVal : scaledVal;
+
+      const posX = startX + j * step;
+      if (isMasked) {
+        // Causal wall block
+        const blockGeo = new RoundedBoxGeometry(0.5, 0.1, 0.5, 2, 0.04);
+        const blockMat = new THREE.MeshStandardMaterial({
+          color: 0x0f172a,
+          roughness: 0.9,
+        });
+        this.trackDisposable(blockGeo, blockMat);
+        const block = new THREE.Mesh(blockGeo, blockMat);
+        block.position.set(posX, 0.05, 0);
+        this.stageRoot.add(block);
+      } else {
+        const h = Math.max(0.1, Math.min(3.2, Math.abs(displayVal) * 0.7));
+        const barGeo = new RoundedBoxGeometry(0.48, h, 0.48, 2, 0.06);
+        const barMat = new THREE.MeshStandardMaterial({
+          color: displayVal >= 0 ? 0x2563eb : 0xd97706,
+          roughness: 0.28,
+        });
+        this.trackDisposable(barGeo, barMat);
+        const bar = new THREE.Mesh(barGeo, barMat);
+        bar.castShadow = true;
+        bar.position.set(posX, h / 2, 0);
+        this.stageRoot.add(bar);
+      }
+
+      // Token label on floor
+      this.renderFloorToken(tok.text, j, j === qIdx, new THREE.Vector3(posX, 0, 1.4));
+    }
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 4: Causal Mask & Softmax (100% Probability Budget)
+  // -------------------------------------------------------------
+  private renderBeat4MaskSoftmax(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 6.5, 9.2), new THREE.Vector3(0, 0, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const probs = layer.attn.probs[snap.head];
+    const pre = layer.attn.preSoftmax[snap.head];
+
+    this.createStageBanner(
+      `Full Attention Matrix · Head ${snap.head}`,
+      snap.showPreSoftmax
+        ? 'Displaying Pre-Softmax Logits (dark slate = -∞ causal wall)'
+        : 'Displaying Softmax Attention % (each horizontal row sums to exactly 100%)',
+      new THREE.Vector3(0, 4.6, -3.8)
+    );
+
+    const cellSize = 0.52;
+    const originX = -((numTokens * cellSize) / 2);
+    const originZ = -((numTokens * cellSize) / 2);
+
+    for (let r = 0; r < numTokens; r++) {
+      for (let c = 0; c < numTokens; c++) {
+        const isFuture = c > r;
+        const posX = originX + c * cellSize;
+        const posZ = originZ + r * cellSize;
+
+        if (isFuture) {
+          // Future tile: dark slate tile with -inf
+          const tileGeo = new RoundedBoxGeometry(cellSize * 0.9, 0.06, cellSize * 0.9, 2, 0.04);
+          const tileMat = new THREE.MeshStandardMaterial({
+            color: 0x0f172a,
+            roughness: 0.95,
+          });
+          this.trackDisposable(tileGeo, tileMat);
+          const tile = new THREE.Mesh(tileGeo, tileMat);
+          tile.position.set(posX, 0.03, posZ);
+          this.stageRoot.add(tile);
+        } else {
+          const p = probs[r]?.[c] ?? 0;
+          const raw = pre[r]?.[c] ?? 0;
+          const val = snap.showPreSoftmax ? raw : p;
+          const h = snap.showPreSoftmax
+            ? Math.max(0.08, Math.min(1.8, Math.abs(val) * 0.4))
+            : Math.max(0.06, p * 2.8);
+
+          const color = snap.showPreSoftmax
+            ? new THREE.Color(divergingColor(val / 4))
+            : new THREE.Color(sequentialColor(p));
+
+          const tileGeo = new RoundedBoxGeometry(cellSize * 0.9, h, cellSize * 0.9, 2, 0.05);
+          const tileMat = new THREE.MeshStandardMaterial({
+            color,
+            roughness: 0.25,
+            metalness: 0.05,
+          });
+          this.trackDisposable(tileGeo, tileMat);
+
+          const tile = new THREE.Mesh(tileGeo, tileMat);
+          tile.castShadow = true;
+          tile.receiveShadow = true;
+          tile.position.set(posX, h / 2, posZ);
+
+          // Highlight the currently selected query row with a glowing perimeter
+          if (r === qIdx) {
+            const edgeGeo = new THREE.EdgesGeometry(tileGeo);
+            const edgeMat = new THREE.LineBasicMaterial({
+              color: 0x3b82f6,
+              linewidth: 2,
+            });
+            this.trackDisposable(edgeGeo, edgeMat);
+            const wire = new THREE.LineSegments(edgeGeo, edgeMat);
+            wire.position.copy(tile.position);
+            this.stageRoot.add(wire);
+          }
+
+          this.stageRoot.add(tile);
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 5: Value Mixing — Blending Slices into a New Idea
+  // -------------------------------------------------------------
+  private renderBeat5ValueMixer(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 4.2, 10.8), new THREE.Vector3(0, 0.5, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const tokQ = snap.traceRes.tokens[qIdx];
+
+    const rowProbs = layer.attn.probs[snap.head][qIdx] ?? [];
+    const headOut = layer.attn.out[snap.head][qIdx] ?? [];
+
+    this.createStageBanner(
+      `Value Mixing for "${formatToken(tokQ.text)}"`,
+      'Attention % pulls weighted slices of past Value vectors into this new 16-d vector',
+      new THREE.Vector3(0, 4.4, -1)
+    );
+
+    // Left side: past tokens and their attention transfer beams
+    const step = 0.58;
+    const startX = -((Math.min(qIdx + 1, 10) * step) / 2) - 1.5;
+
+    for (let j = 0; j <= qIdx; j++) {
+      if (j > 10) break; // keep visible range tidy
+      const p = rowProbs[j] ?? 0;
+      const tok = snap.traceRes.tokens[j];
+      const posX = startX + j * step;
+
+      const beamH = Math.max(0.1, p * 3.4);
+      const beamGeo = new RoundedBoxGeometry(0.42, beamH, 0.42, 2, 0.06);
+      const beamMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(sequentialColor(p)),
+        roughness: 0.2,
+      });
+      this.trackDisposable(beamGeo, beamMat);
+      const beam = new THREE.Mesh(beamGeo, beamMat);
+      beam.castShadow = true;
+      beam.position.set(posX, beamH / 2, 0.5);
+      this.stageRoot.add(beam);
+
+      this.renderFloorToken(tok.text, j, j === qIdx, new THREE.Vector3(posX, 0, 1.8));
+    }
+
+    // Right side: resulting 16-d output vector column
+    this.renderVectorTower(
+      headOut,
+      `Output y_${qIdx}`,
+      `Head ${snap.head} Context (16-d)`,
+      new THREE.Vector3(3.8, 0, 0.5),
+      '#0284c7'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // BEAT 6: 4-Head Orchestra & Output Projection (W_o)
+  // -------------------------------------------------------------
+  private renderBeat6Multihead(snap: StageSnapshot): void {
+    const layer = snap.traceRes.layers[snap.layer];
+    if (!layer) return;
+
+    this.setCameraTarget(new THREE.Vector3(0, 4.0, 11.5), new THREE.Vector3(0, 0.6, 0));
+
+    const numTokens = snap.traceRes.tokens.length;
+    const qIdx = clampIndex(snap.queryIdx, numTokens);
+    const tokQ = snap.traceRes.tokens[qIdx];
+
+    this.createStageBanner(
+      `4-Head Ensemble for "${formatToken(tokQ.text)}"`,
+      'Four 16-d heads concatenate into 64-d and mix through Output Matrix W_o',
+      new THREE.Vector3(0, 4.4, -1.5)
+    );
+
+    const headColors = ['#2563eb', '#059669', '#d97706', '#7c3aed'];
+    const headNames = ['Head 0 (Gender/Subject)', 'Head 1 (Punctuation)', 'Head 2 (Verb/Action)', 'Head 3 (Thematic Target)'];
+
+    for (let h = 0; h < 4; h++) {
+      const isOff = isHeadDisabled(snap.ablation, snap.layer, h);
+      const outVec = layer.attn.out[h][qIdx] ?? [];
+      const posX = -4.5 + h * 3.0;
+
+      this.renderVectorTower(
+        outVec,
+        `H${h} ${isOff ? '(Ablated)' : ''}`,
+        headNames[h],
+        new THREE.Vector3(posX, 0, 0),
+        isOff ? '#94a3b8' : headColors[h],
+        isOff
+      );
+    }
+  }
+
+  // -------------------------------------------------------------
+  // Stage Utilities & Primitives
+  // -------------------------------------------------------------
+  private renderVectorTower(
+    vec: number[],
+    title: string,
+    subtitle: string,
+    origin: THREE.Vector3,
+    colorHex: string,
+    muted = false
+  ): void {
+    const group = new THREE.Group();
+    group.position.copy(origin);
+
+    const titleTex = createLabelSpriteTexture(title, subtitle, colorHex, muted);
+    this.trackDisposable(titleTex);
+    const titleMat = new THREE.SpriteMaterial({ map: titleTex, transparent: true });
+    this.trackDisposable(titleMat);
+    const sprite = new THREE.Sprite(titleMat);
+    sprite.scale.set(2.4, 0.7, 1);
+    sprite.position.set(0, 3.4, 0);
+    group.add(sprite);
+
+    // 16 slabs arranged vertically
+    const slabW = 1.1;
+    const slabD = 0.55;
+    const slabH = 0.14;
+    const gap = 0.04;
+
+    for (let i = 0; i < 16; i++) {
+      const val = vec[i] ?? 0;
+      const col = muted
+        ? new THREE.Color(0xcbd5e1)
+        : new THREE.Color(divergingColor(val / 2.5));
+
+      const geo = new RoundedBoxGeometry(slabW, slabH, slabD, 2, 0.03);
+      const mat = new THREE.MeshStandardMaterial({
+        color: col,
+        roughness: 0.24,
+        metalness: 0.08,
+      });
+      this.trackDisposable(geo, mat);
+
+      const slab = new THREE.Mesh(geo, mat);
+      slab.castShadow = true;
+      slab.receiveShadow = true;
+      slab.position.set(0, 0.1 + i * (slabH + gap), 0);
+      group.add(slab);
+    }
+
+    this.stageRoot.add(group);
+  }
+
+  private renderFloorToken(text: string, index: number, isQuery: boolean, pos: THREE.Vector3): void {
+    const canvas = document.createElement('canvas');
+    canvas.width = 160;
+    canvas.height = 70;
+    const ctx = canvas.getContext('2d')!;
+
+    ctx.fillStyle = isQuery ? '#1d4ed8' : '#ffffff';
+    ctx.roundRect(4, 4, 152, 62, 10);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = isQuery ? '#1d4ed8' : '#cbd5e1';
+    ctx.stroke();
+
+    ctx.fillStyle = isQuery ? '#ffffff' : '#0f172a';
+    ctx.font = '600 24px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(formatToken(text).slice(0, 8), 80, 35);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.trackDisposable(tex);
+
+    const geo = new THREE.PlaneGeometry(0.5, 0.22);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+    this.trackDisposable(geo, mat);
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.copy(pos);
+    mesh.position.y = 0.02;
+
+    (mesh as unknown as { clickTag: ClickTag }).clickTag = { kind: 'token', index };
+    this.interactives.push(mesh);
+    this.stageRoot.add(mesh);
+  }
+
+  private renderTokenPill(text: string, pos: THREE.Vector3, colorHex: string): void {
+    const canvas = document.createElement('canvas');
+    canvas.width = 300;
+    canvas.height = 70;
+    const ctx = canvas.getContext('2d')!;
+
+    ctx.fillStyle = colorHex;
+    ctx.roundRect(4, 4, 292, 62, 12);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 24px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text.slice(0, 20), 150, 35);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.trackDisposable(tex);
+
+    const geo = new THREE.PlaneGeometry(1.2, 0.28);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+    this.trackDisposable(geo, mat);
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.copy(pos);
+    mesh.position.y = 0.02;
+    this.stageRoot.add(mesh);
+  }
+
+  private renderInputTokenPuck(text: string, idx: number, pos: THREE.Vector3): void {
+    const puckGeo = new THREE.CylinderGeometry(0.65, 0.65, 0.18, 32);
+    const puckMat = new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      roughness: 0.3,
+    });
+    this.trackDisposable(puckGeo, puckMat);
+
+    const mesh = new THREE.Mesh(puckGeo, puckMat);
+    mesh.position.copy(pos);
+    mesh.position.y = 0.09;
+    mesh.castShadow = true;
+    this.stageRoot.add(mesh);
+
+    const labelTex = createLabelSpriteTexture(`Input: "${formatToken(text)}"`, `Token [${idx}]`, '#1d4ed8');
+    this.trackDisposable(labelTex);
+    const spriteMat = new THREE.SpriteMaterial({ map: labelTex, transparent: true });
+    this.trackDisposable(spriteMat);
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.scale.set(2.0, 0.6, 1);
+    sprite.position.copy(pos);
+    sprite.position.y = 0.65;
+    this.stageRoot.add(sprite);
+  }
+
+  private createStageBanner(primary: string, secondary: string, pos: THREE.Vector3): void {
+    const tex = createLabelSpriteTexture(primary, secondary, '#1d4ed8');
+    this.trackDisposable(tex);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+    this.trackDisposable(mat);
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(4.0, 1.15, 1);
+    sprite.position.copy(pos);
+    this.stageRoot.add(sprite);
+  }
+
+  private setCameraTarget(pos: THREE.Vector3, look: THREE.Vector3): void {
+    this.camTargetPos.copy(pos);
+    this.camTargetLook.copy(look);
+  }
+
+  public resetCamera(): void {
+    this.camera.position.set(0, 4.2, 11);
+    this.controls.target.set(0, 0.2, 0);
+    this.controls.update();
+  }
+
+  public resize(width: number, height: number): void {
     if (width <= 0 || height <= 0) return;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   }
 
-  public resetCamera() {
-    this.camera.position.set(0, 16, 32);
-    this.controls.target.set(0, 0, 0);
+  private clearDynamicScene(): void {
+    this.interactives = [];
+
+    while (this.stageRoot.children.length > 0) {
+      const child = this.stageRoot.children[0];
+      this.stageRoot.remove(child);
+    }
+
+    for (const g of this.disposableGeometries) g.dispose();
+    this.disposableGeometries = [];
+
+    for (const m of this.disposableMaterials) m.dispose();
+    this.disposableMaterials = [];
+
+    for (const t of this.disposableTextures) t.dispose();
+    this.disposableTextures = [];
+  }
+
+  private trackDisposable(
+    ...items: (THREE.BufferGeometry | THREE.Material | THREE.Texture | undefined)[]
+  ): void {
+    for (const item of items) {
+      if (!item) continue;
+      if (item instanceof THREE.BufferGeometry) this.disposableGeometries.push(item);
+      else if (item instanceof THREE.Material) this.disposableMaterials.push(item);
+      else if (item instanceof THREE.Texture) this.disposableTextures.push(item);
+    }
+  }
+
+  private handlePointerMove = (e: MouseEvent): void => {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  };
+
+  private handleClick = (): void => {
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hits = this.raycaster.intersectObjects(this.interactives, true);
+    if (hits.length === 0) return;
+
+    const hit = hits[0].object as unknown as { clickTag?: ClickTag };
+    if (!hit.clickTag) return;
+
+    if (hit.clickTag.kind === 'token') {
+      this.callbacks.onPickToken(hit.clickTag.index);
+    } else if (hit.clickTag.kind === 'head') {
+      this.callbacks.onPickHead(hit.clickTag.index);
+    }
+  };
+
+  private animate = (): void => {
+    requestAnimationFrame(this.animate);
     this.controls.update();
-  }
-
-  public update(data: StageRenderData) {
-    this.currentData = data;
-    this.rebuildContent();
-  }
-
-  private clearGroup(grp: THREE.Group) {
-    while (grp.children.length > 0) {
-      const obj = grp.children[0];
-      grp.remove(obj);
-      if ((obj as THREE.Mesh).isMesh || (obj as THREE.Sprite).isSprite) {
-        const mesh = obj as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (mesh.material) {
-          if (Array.isArray(mesh.material)) {
-            mesh.material.forEach((m) => m.dispose());
-          } else {
-            mesh.material.dispose();
-          }
-        }
-      }
-    }
-  }
-
-  private rebuildContent() {
-    this.clearGroup(this.contentGroup);
-    if (!this.currentData || !this.currentData.trace) return;
-
-    const { state, trace, activeBeatId } = this.currentData;
-    const numTokens = trace.tokens.length;
-    const resolvedQ = Math.max(
-      0,
-      Math.min(numTokens - 1, state.queryIdx ?? numTokens - 1)
-    );
-    const resolvedK = Math.max(
-      0,
-      Math.min(numTokens - 1, state.keyIdx ?? resolvedQ)
-    );
-
-    switch (activeBeatId) {
-      case 'attn-1-problem':
-        this.buildBeat1QKV(trace, state, resolvedQ);
-        break;
-      case 'attn-2-dot-product':
-        this.buildBeat2DotProduct(trace, state, resolvedQ, resolvedK);
-        break;
-      case 'attn-3-scan-row':
-        this.buildBeat3Scale(trace, state, resolvedQ);
-        break;
-      case 'attn-4-mask-softmax':
-        this.buildBeat4MaskSoftmax(trace, state, resolvedQ);
-        break;
-      case 'attn-5-value-mixer':
-        this.buildBeat5ValueMixer(trace, state, resolvedQ);
-        break;
-      case 'attn-6-multihead-full':
-        this.buildBeat6MultiHead(trace, state, resolvedQ);
-        break;
-      default:
-        this.buildBeat1QKV(trace, state, resolvedQ);
-        break;
-    }
-  }
-
-  // --- BEAT 1: QKV Projection ---
-  private buildBeat1QKV(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const tok = trace.tokens[qIdx];
-    const tokLabel = formatToken(tok.text);
-    const head = state.head;
-
-    const qHead = layer.attn.q[head][qIdx] ?? [];
-    const kHead = layer.attn.k[head][qIdx] ?? [];
-    const vHead = layer.attn.v[head][qIdx] ?? [];
-
-    const banner = makeTextSprite(
-      `Token [${qIdx}] "${tokLabel}" Projections · Block ${state.layer} · Head ${head}`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 9.5, 0);
-    this.contentGroup.add(banner);
-
-    const roles = [
-      {
-        name: 'Query (Q)',
-        vec: qHead,
-        colorHex: 0x2563eb,
-        xOff: -10,
-        sub: 'What I seek',
-      },
-      {
-        name: 'Key (K)',
-        vec: kHead,
-        colorHex: 0x059669,
-        xOff: 0,
-        sub: 'What I advertise',
-      },
-      {
-        name: 'Value (V)',
-        vec: vHead,
-        colorHex: 0xd97706,
-        xOff: 10,
-        sub: 'Content to deliver',
-      },
-    ];
-
-    roles.forEach((r) => {
-      const header = makeTextSprite(`${r.name} [d=16]`, {
-        fontSize: 20,
-        bgColor: '#ffffff',
-        fontColor: '#0f172a',
-      });
-      header.position.set(r.xOff, 7.5, 0);
-      this.contentGroup.add(header);
-
-      const subSprite = makeTextSprite(r.sub, {
-        fontSize: 14,
-        bgColor: '#f1f5f9',
-        fontColor: '#475569',
-      });
-      subSprite.position.set(r.xOff, 6.2, 0);
-      this.contentGroup.add(subSprite);
-
-      for (let c = 0; c < 16; c++) {
-        const val = r.vec[c] ?? 0;
-        const barH = Math.max(0.12, Math.abs(val) * 1.8);
-        const geo = new RoundedBoxGeometry(0.75, barH, 0.75, 2, 0.08);
-        const col = val >= 0 ? r.colorHex : 0xf43f5e;
-        const mat = new THREE.MeshStandardMaterial({
-          color: col,
-          roughness: 0.25,
-          metalness: 0.1,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.position.set(
-          r.xOff - 3.2 + (c % 4) * 2.1,
-          barH / 2,
-          -2.5 + Math.floor(c / 4) * 2.0
-        );
-        this.contentGroup.add(mesh);
-      }
-    });
-
-    const residualTag = makeTextSprite('Residual Input (64-d vector)', {
-      fontSize: 16,
-      bgColor: '#e2e8f0',
-      fontColor: '#1e293b',
-    });
-    residualTag.position.set(0, 0.5, 6);
-    this.contentGroup.add(residualTag);
-  }
-
-  // --- BEAT 2: Dot Product ---
-  private buildBeat2DotProduct(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number,
-    kIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const qVec = layer.attn.q[state.head][qIdx] ?? [];
-    const kVec = layer.attn.k[state.head][kIdx] ?? [];
-    const breakdown = computeDotProductBreakdown(qVec, kVec);
-
-    const tokQ = formatToken(trace.tokens[qIdx].text);
-    const tokK = formatToken(trace.tokens[kIdx].text);
-
-    const banner = makeTextSprite(
-      `Dot Product: Q("${tokQ}") · K("${tokK}") = ${formatNum(breakdown.sum)}`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 10.5, 0);
-    this.contentGroup.add(banner);
-
-    for (let c = 0; c < 16; c++) {
-      const qVal = qVec[c] ?? 0;
-      const kVal = kVec[c] ?? 0;
-      const prod = breakdown.products[c] ?? 0;
-
-      const x = -12.5 + c * 1.65;
-
-      const qH = Math.max(0.08, Math.abs(qVal) * 1.5);
-      const qBar = new THREE.Mesh(
-        new RoundedBoxGeometry(0.5, qH, 0.5, 2, 0.05),
-        new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.3 })
-      );
-      qBar.position.set(x, qH / 2, 3.5);
-      qBar.castShadow = true;
-      this.contentGroup.add(qBar);
-
-      const kH = Math.max(0.08, Math.abs(kVal) * 1.5);
-      const kBar = new THREE.Mesh(
-        new RoundedBoxGeometry(0.5, kH, 0.5, 2, 0.05),
-        new THREE.MeshStandardMaterial({ color: 0x059669, roughness: 0.3 })
-      );
-      kBar.position.set(x, kH / 2, 0.5);
-      kBar.castShadow = true;
-      this.contentGroup.add(kBar);
-
-      const prodH = Math.max(0.1, Math.abs(prod) * 2.2);
-      const prodBar = new THREE.Mesh(
-        new RoundedBoxGeometry(0.85, prodH, 0.85, 2, 0.08),
-        new THREE.MeshStandardMaterial({
-          color: prod >= 0 ? 0x0284c7 : 0xf43f5e,
-          roughness: 0.2,
-        })
-      );
-      prodBar.position.set(x, prodH / 2, -3.5);
-      prodBar.castShadow = true;
-      this.contentGroup.add(prodBar);
-    }
-
-    const lblQ = makeTextSprite(`Q [${tokQ}]`, {
-      fontSize: 16,
-      bgColor: '#dbeafe',
-      fontColor: '#1e40af',
-    });
-    lblQ.position.set(-15, 1.5, 3.5);
-    this.contentGroup.add(lblQ);
-
-    const lblK = makeTextSprite(`K [${tokK}]`, {
-      fontSize: 16,
-      bgColor: '#d1fae5',
-      fontColor: '#065f46',
-    });
-    lblK.position.set(-15, 1.5, 0.5);
-    this.contentGroup.add(lblK);
-
-    const lblP = makeTextSprite(`q × k (Products)`, {
-      fontSize: 16,
-      bgColor: '#f1f5f9',
-      fontColor: '#0f172a',
-    });
-    lblP.position.set(-15, 1.5, -3.5);
-    this.contentGroup.add(lblP);
-  }
-
-  // --- BEAT 3: Scale by √d ---
-  private buildBeat3Scale(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const row = layer.attn.preSoftmax[state.head][qIdx] ?? [];
-    const numTokens = trace.tokens.length;
-
-    const banner = makeTextSprite(
-      `Scale Factor: 1 / √16 = 0.25 · Row ${qIdx} ("${formatToken(
-        trace.tokens[qIdx].text
-      )}")`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 10.5, 0);
-    this.contentGroup.add(banner);
-
-    for (let j = 0; j < numTokens; j++) {
-      const scaledVal = row[j] ?? 0;
-      const unscaledVal = scaledVal * 4.0;
-      const x = -10 + j * 1.5;
-
-      if (j > qIdx) {
-        const maskedBlock = new THREE.Mesh(
-          new RoundedBoxGeometry(1.0, 0.2, 1.0, 2, 0.04),
-          new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.9 })
-        );
-        maskedBlock.position.set(x, 0.1, 0);
-        this.contentGroup.add(maskedBlock);
-        continue;
-      }
-
-      const unscaledH = Math.max(0.1, Math.abs(unscaledVal) * 0.65);
-      const unscaledBar = new THREE.Mesh(
-        new RoundedBoxGeometry(0.5, unscaledH, 0.5, 2, 0.05),
-        new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.3 })
-      );
-      unscaledBar.position.set(x - 0.35, unscaledH / 2, 2.5);
-      unscaledBar.castShadow = true;
-      this.contentGroup.add(unscaledBar);
-
-      const scaledH = Math.max(0.1, Math.abs(scaledVal) * 0.65);
-      const scaledBar = new THREE.Mesh(
-        new RoundedBoxGeometry(0.5, scaledH, 0.5, 2, 0.05),
-        new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2 })
-      );
-      scaledBar.position.set(x + 0.35, scaledH / 2, -2.5);
-      scaledBar.castShadow = true;
-      this.contentGroup.add(scaledBar);
-
-      const tokLabel = makeTextSprite(formatToken(trace.tokens[j].text), {
-        fontSize: 14,
-        bgColor: '#ffffff',
-        fontColor: '#334155',
-      });
-      tokLabel.position.set(x, 0.4, 5);
-      this.contentGroup.add(tokLabel);
-    }
-
-    const legend1 = makeTextSprite('Unscaled Dot Products (High Variance)', {
-      fontSize: 16,
-      bgColor: '#fef3c7',
-      fontColor: '#92400e',
-    });
-    legend1.position.set(-13, 2.5, 2.5);
-    this.contentGroup.add(legend1);
-
-    const legend2 = makeTextSprite('Scaled by 1/4 (Healthy Softmax Gradient)', {
-      fontSize: 16,
-      bgColor: '#e0f2fe',
-      fontColor: '#075985',
-    });
-    legend2.position.set(-13, 2.5, -2.5);
-    this.contentGroup.add(legend2);
-  }
-
-  // --- BEAT 4: Causal Mask & Softmax ---
-  private buildBeat4MaskSoftmax(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const matrix = state.showPreSoftmax
-      ? layer.attn.preSoftmax[state.head]
-      : layer.attn.probs[state.head];
-    const N = trace.tokens.length;
-
-    const banner = makeTextSprite(
-      state.showPreSoftmax
-        ? `Pre-Softmax Logits (with -∞ Causal Mask)`
-        : `Post-Softmax Attention Weights (100% per row)`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 11, 0);
-    this.contentGroup.add(banner);
-
-    const cellSize = 1.35;
-    const originX = -((N * cellSize) / 2);
-    const originZ = -((N * cellSize) / 2);
-
-    for (let i = 0; i < N; i++) {
-      for (let j = 0; j < N; j++) {
-        const x = originX + j * cellSize + cellSize / 2;
-        const z = originZ + i * cellSize + cellSize / 2;
-
-        if (j > i) {
-          const darkSlate = new THREE.Mesh(
-            new RoundedBoxGeometry(
-              cellSize * 0.9,
-              0.2,
-              cellSize * 0.9,
-              2,
-              0.04
-            ),
-            new THREE.MeshStandardMaterial({
-              color: 0x334155,
-              roughness: 0.9,
-            })
-          );
-          darkSlate.position.set(x, 0.1, z);
-          this.contentGroup.add(darkSlate);
-          continue;
-        }
-
-        const val = matrix[i]?.[j] ?? 0;
-        const h = state.showPreSoftmax
-          ? Math.max(0.15, Math.abs(val) * 0.6)
-          : Math.max(0.15, val * 8.0);
-        const col = state.showPreSoftmax
-          ? threeDivergingColor(val, 4.0)
-          : threeSequentialColor(val);
-
-        const tile = new THREE.Mesh(
-          new RoundedBoxGeometry(
-            cellSize * 0.9,
-            h,
-            cellSize * 0.9,
-            2,
-            0.06
-          ),
-          new THREE.MeshStandardMaterial({
-            color: col,
-            roughness: 0.25,
-            metalness: 0.05,
-          })
-        );
-        tile.position.set(x, h / 2, z);
-        tile.castShadow = true;
-        tile.receiveShadow = true;
-
-        if (i === qIdx) {
-          const edge = new THREE.BoxHelper(tile, new THREE.Color(0x1d4ed8));
-          this.contentGroup.add(edge);
-        }
-
-        this.contentGroup.add(tile);
-      }
-    }
-  }
-
-  // --- BEAT 5: Value Mixer ---
-  private buildBeat5ValueMixer(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const probs = layer.attn.probs[state.head][qIdx] ?? [];
-    const outHead = layer.attn.out[state.head][qIdx] ?? [];
-    const tokQ = formatToken(trace.tokens[qIdx].text);
-
-    const banner = makeTextSprite(
-      `Token "${tokQ}" Blending Value Vectors according to Attention %`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 11, 0);
-    this.contentGroup.add(banner);
-
-    for (let j = 0; j <= qIdx; j++) {
-      const weight = probs[j] ?? 0;
-      const x = -10 + j * 1.55;
-      const tokJ = formatToken(trace.tokens[j].text);
-
-      const beamH = Math.max(0.1, weight * 9);
-      const beam = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.12, 0.45, beamH, 16),
-        new THREE.MeshStandardMaterial({
-          color: 0x38bdf8,
-          roughness: 0.2,
-          transparent: true,
-          opacity: Math.max(0.2, weight * 1.5),
-        })
-      );
-      beam.position.set(x, beamH / 2, 2);
-      this.contentGroup.add(beam);
-
-      const pLabel = makeTextSprite(`${(weight * 100).toFixed(0)}%`, {
-        fontSize: 16,
-        bgColor: '#ffffff',
-        fontColor: '#0f172a',
-      });
-      pLabel.position.set(x, beamH + 0.8, 2);
-      this.contentGroup.add(pLabel);
-
-      const tokLabel = makeTextSprite(tokJ, {
-        fontSize: 14,
-        bgColor: '#f1f5f9',
-        fontColor: '#334155',
-      });
-      tokLabel.position.set(x, 0.4, 4);
-      this.contentGroup.add(tokLabel);
-    }
-
-    const outBanner = makeTextSprite(
-      `Resulting Head Vector y_${qIdx} (d=16)`,
-      { fontSize: 20, bgColor: '#0284c7', fontColor: '#ffffff' }
-    );
-    outBanner.position.set(0, 7.5, -4);
-    this.contentGroup.add(outBanner);
-
-    for (let c = 0; c < 16; c++) {
-      const val = outHead[c] ?? 0;
-      const barH = Math.max(0.15, Math.abs(val) * 2.0);
-      const mesh = new THREE.Mesh(
-        new RoundedBoxGeometry(0.7, barH, 0.7, 2, 0.06),
-        new THREE.MeshStandardMaterial({
-          color: val >= 0 ? 0x0284c7 : 0xf43f5e,
-          roughness: 0.25,
-        })
-      );
-      mesh.position.set(
-        -6.5 + (c % 8) * 1.8,
-        barH / 2,
-        -4 - Math.floor(c / 8) * 1.8
-      );
-      mesh.castShadow = true;
-      this.contentGroup.add(mesh);
-    }
-  }
-
-  // --- BEAT 6: 4-Head Orchestra ---
-  private buildBeat6MultiHead(
-    trace: EngineTraceResult,
-    state: BookState,
-    qIdx: number
-  ) {
-    const layer = trace.layers[state.layer];
-    if (!layer) return;
-
-    const banner = makeTextSprite(
-      `4 Heads in Parallel · Concatenated to 64 dimensions · Multiplied by Wo`,
-      { fontSize: 24, bgColor: '#111827', fontColor: '#ffffff' }
-    );
-    banner.position.set(0, 11, 0);
-    this.contentGroup.add(banner);
-
-    const headColors = [0x2563eb, 0x059669, 0xd97706, 0x7c3aed];
-    const xOffsets = [-12, -4, 4, 12];
-
-    for (let h = 0; h < 4; h++) {
-      const off = (state.ablation.disabledHeads ?? []).some(
-        ([l, hd]) => l === state.layer && hd === h
-      );
-
-      const hLabel = makeTextSprite(
-        `Head ${h} ${off ? '(ABLATED - OFF)' : '(Active)'}`,
-        {
-          fontSize: 18,
-          bgColor: off ? '#fee2e2' : '#ffffff',
-          fontColor: off ? '#991b1b' : '#0f172a',
-        }
-      );
-      hLabel.position.set(xOffsets[h], 7.5, 0);
-      this.contentGroup.add(hLabel);
-
-      const headVec = layer.attn.out[h][qIdx] ?? [];
-      for (let c = 0; c < 16; c++) {
-        const val = off ? 0 : headVec[c] ?? 0;
-        const barH = Math.max(0.12, Math.abs(val) * 1.8);
-        const mesh = new THREE.Mesh(
-          new RoundedBoxGeometry(0.7, barH, 0.7, 2, 0.06),
-          new THREE.MeshStandardMaterial({
-            color: off ? 0x94a3b8 : headColors[h],
-            roughness: 0.3,
-            metalness: off ? 0.0 : 0.1,
-          })
-        );
-        mesh.position.set(
-          xOffsets[h] - 1.5 + (c % 4) * 1.0,
-          barH / 2,
-          -2 + Math.floor(c / 4) * 1.1
-        );
-        mesh.castShadow = true;
-        this.contentGroup.add(mesh);
-      }
-    }
-
-    const woSprite = makeTextSprite('Projection Matrix W_o (64 × 64)', {
-      fontSize: 18,
-      bgColor: '#1e293b',
-      fontColor: '#ffffff',
-    });
-    woSprite.position.set(0, 2.5, 6);
-    this.contentGroup.add(woSprite);
-  }
-
-  private startLoop() {
-    const loop = () => {
-      this.animFrameId = requestAnimationFrame(loop);
-      this.controls.update();
-      this.renderer.render(this.scene, this.camera);
-    };
-    loop();
-  }
-
-  public destroy() {
-    if (this.animFrameId !== null) {
-      cancelAnimationFrame(this.animFrameId);
-    }
-    this.controls.dispose();
-    this.clearGroup(this.contentGroup);
-    this.pmremGenerator.dispose();
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  public dispose(): void {
+    this.renderer.domElement.removeEventListener('pointermove', this.handlePointerMove);
+    this.renderer.domElement.removeEventListener('click', this.handleClick);
+    this.clearDynamicScene();
     this.envRT.dispose();
     this.renderer.dispose();
-    if (this.renderer.domElement.parentNode === this.container) {
-      this.container.removeChild(this.renderer.domElement);
-    }
+    this.controls.dispose();
   }
+}
+
+function clampIndex(idx: number, len: number): number {
+  if (len <= 0) return 0;
+  if (!Number.isFinite(idx)) return 0;
+  return Math.max(0, Math.min(len - 1, Math.round(idx)));
 }

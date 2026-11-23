@@ -3,58 +3,40 @@ import * as THREE from 'three';
 export function sequentialColor(tRaw: number): string {
   const t = Math.max(0, Math.min(1, tRaw));
   const stops: [number, [number, number, number]][] = [
-    [0.0, [254, 250, 243]],
-    [0.2, [253, 230, 138]],
-    [0.45, [245, 158, 11]],
-    [0.75, [217, 70, 239]],
-    [1.0, [67, 24, 255]],
+    [0.0, [242, 245, 250]],
+    [0.25, [191, 219, 254]],
+    [0.55, [59, 130, 246]],
+    [0.82, [29, 78, 216]],
+    [1.0, [23, 37, 84]],
   ];
   return interpolateStops(t, stops);
 }
 
-export function divergingColor(val: number, maxAbs: number): string {
-  if (maxAbs <= 1e-9) return 'rgb(240, 243, 246)';
-  const t = Math.max(-1, Math.min(1, val / maxAbs));
-  if (t < 0) {
-    const k = -t;
-    const r = Math.round(247 - 40 * k);
-    const g = Math.round(248 - 140 * k);
-    const b = Math.round(250 - 200 * k);
-    return `rgb(${r}, ${g}, ${b})`;
-  }
-  const k = t;
-  const r = Math.round(247 + 0 * k);
-  const g = Math.round(248 - 150 * k);
-  const b = Math.round(250 - 150 * k);
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
-export function threeSequentialColor(tRaw: number): THREE.Color {
-  const css = sequentialColor(tRaw);
-  return new THREE.Color(css);
-}
-
-export function threeDivergingColor(val: number, maxAbs: number): THREE.Color {
-  const css = divergingColor(val, maxAbs);
-  return new THREE.Color(css);
+export function divergingColor(normRaw: number): string {
+  const v = Math.max(-1, Math.min(1, normRaw));
+  const t = (v + 1) / 2;
+  const stops: [number, [number, number, number]][] = [
+    [0.0, [30, 58, 138]],
+    [0.25, [96, 165, 250]],
+    [0.5, [248, 250, 252]],
+    [0.75, [251, 146, 60]],
+    [1.0, [180, 83, 9]],
+  ];
+  return interpolateStops(t, stops);
 }
 
 function interpolateStops(
   t: number,
   stops: [number, [number, number, number]][]
 ): string {
-  if (t <= stops[0][0]) {
-    const c = stops[0][1];
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-  }
   for (let i = 0; i < stops.length - 1; i++) {
-    const [p0, c0] = stops[i];
-    const [p1, c1] = stops[i + 1];
-    if (t >= p0 && t <= p1) {
-      const u = (t - p0) / Math.max(1e-6, p1 - p0);
-      const r = Math.round(c0[0] + u * (c1[0] - c0[0]));
-      const g = Math.round(c0[1] + u * (c1[1] - c0[1]));
-      const b = Math.round(c0[2] + u * (c1[2] - c0[2]));
+    const [t0, c0] = stops[i];
+    const [t1, c1] = stops[i + 1];
+    if (t >= t0 && t <= t1) {
+      const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+      const r = Math.round(c0[0] + (c1[0] - c0[0]) * f);
+      const g = Math.round(c0[1] + (c1[1] - c0[1]) * f);
+      const b = Math.round(c0[2] + (c1[2] - c0[2]) * f);
       return `rgb(${r}, ${g}, ${b})`;
     }
   }
@@ -62,177 +44,178 @@ function interpolateStops(
   return `rgb(${last[0]}, ${last[1]}, ${last[2]})`;
 }
 
-export function formatToken(tok: string): string {
-  return tok
-    .replace(/\n/g, '↵')
-    .replace(/\t/g, '⇥')
-    .replace(/ /g, '·');
+export function formatToken(raw: string): string {
+  if (raw === '\n') return '↵';
+  if (raw === ' ') return '␣';
+  return raw.replace(/^ /, '');
 }
 
-export function formatTokenExplicit(tok: string): string {
-  if (tok === ' ') return '␣ (space)';
-  if (tok === '\n') return '↵ (newline)';
-  if (tok.startsWith(' ')) return `·${tok.slice(1)}`;
-  return tok;
+export function formatTokenExplicit(raw: string): string {
+  if (raw === '\n') return '\\n';
+  if (raw === ' ') return '·';
+  return raw.replace(/^ /, '·');
 }
 
-export function formatNum(n: number | null | undefined, digits = 3): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
-  if (Math.abs(n) < 1e-4 && n !== 0) return n.toExponential(2);
+export function formatNum(n: number, digits = 3): string {
+  if (!Number.isFinite(n)) return '0';
   return n.toFixed(digits);
 }
 
-export function computeDotProductBreakdown(
-  q: number[],
-  k: number[]
-): {
-  products: number[];
-  sum: number;
-  scaled: number;
-} {
-  const d = Math.min(q.length, k.length);
-  const products: number[] = new Array(d);
+export function vectorL2Norm(vec: number[]): number {
   let sum = 0;
-  for (let i = 0; i < d; i++) {
-    const p = (q[i] ?? 0) * (k[i] ?? 0);
+  for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
+  return Math.sqrt(sum);
+}
+
+export interface DotProductBreakdown {
+  dim: number;
+  products: number[];
+  rawDot: number;
+  scaleDivisor: number;
+  scaledScore: number;
+  positiveVotes: number;
+  negativeVotes: number;
+}
+
+/**
+ * Compute exact element-by-element Q · K / sqrt(d_head) breakdown for Beat 2.
+ */
+export function computeDotProductBreakdown(
+  qVec: number[],
+  kVec: number[]
+): DotProductBreakdown {
+  const dim = Math.min(qVec.length, kVec.length);
+  const products = new Array<number>(dim);
+  let rawDot = 0;
+  let positiveVotes = 0;
+  let negativeVotes = 0;
+
+  for (let i = 0; i < dim; i++) {
+    const p = qVec[i] * kVec[i];
     products[i] = p;
-    sum += p;
+    rawDot += p;
+    if (p >= 0) positiveVotes += p;
+    else negativeVotes += p;
   }
-  const scaled = sum / Math.sqrt(d || 1);
-  return { products, sum, scaled };
+
+  const scaleDivisor = Math.sqrt(Math.max(1, dim));
+  return {
+    dim,
+    products,
+    rawDot,
+    scaleDivisor,
+    scaledScore: rawDot / scaleDivisor,
+    positiveVotes,
+    negativeVotes,
+  };
 }
 
-export function makeTextSprite(
-  text: string,
-  options?: {
-    fontSize?: number;
-    fontFamily?: string;
-    fontColor?: string;
-    bgColor?: string;
-    borderColor?: string;
-    borderWidth?: number;
-    padding?: number;
-    scale?: number;
-  }
-): THREE.Sprite {
-  const fontSize = options?.fontSize ?? 26;
-  const fontFamily =
-    options?.fontFamily ??
-    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-  const fontColor = options?.fontColor ?? '#1a2233';
-  const bgColor = options?.bgColor ?? 'rgba(255, 255, 255, 0.94)';
-  const borderColor = options?.borderColor ?? 'rgba(209, 217, 226, 0.9)';
-  const borderWidth = options?.borderWidth ?? 2;
-  const padding = options?.padding ?? 14;
-  const scale = options?.scale ?? 1.0;
-
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return new THREE.Sprite();
-
-  const font = `600 ${fontSize}px ${fontFamily}`;
-  ctx.font = font;
-  const metrics = ctx.measureText(text);
-  const textWidth = Math.ceil(metrics.width);
-  const textHeight = fontSize * 1.25;
-
-  canvas.width = Math.max(32, textWidth + padding * 2);
-  canvas.height = Math.max(32, Math.ceil(textHeight + padding * 2));
-
-  ctx.font = font;
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
-
-  if (bgColor && bgColor !== 'transparent') {
-    ctx.fillStyle = bgColor;
-    ctx.beginPath();
-    const r = 8;
-    const x = borderWidth / 2;
-    const y = borderWidth / 2;
-    const w = canvas.width - borderWidth;
-    const h = canvas.height - borderWidth;
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y + x, x, y, r);
-    ctx.closePath();
-    ctx.fill();
-
-    if (borderWidth > 0 && borderColor) {
-      ctx.strokeStyle = borderColor;
-      ctx.lineWidth = borderWidth;
-      ctx.stroke();
-    }
-  }
-
-  ctx.fillStyle = fontColor;
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.minFilter = THREE.LinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-
-  const material = new THREE.SpriteMaterial({
-    map: texture,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-  });
-
-  const sprite = new THREE.Sprite(material);
-  const aspect = canvas.width / canvas.height;
-  const baseH = (canvas.height / 100) * scale;
-  sprite.scale.set(baseH * aspect, baseH, 1);
-  return sprite;
-}
-
-export function makeMatrixCanvasTexture(
+export function createTensorTexture(
   matrix: number[][],
-  options?: {
-    isPreSoftmax?: boolean;
-    cellSize?: number;
-    maxAbs?: number;
-  }
+  mode: 'diverging' | 'sequential' = 'diverging',
+  transpose = false
 ): THREE.CanvasTexture {
-  const rows = matrix.length;
-  const cols = matrix[0]?.length ?? 0;
-  const cellSize = options?.cellSize ?? 16;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, cols * cellSize);
-  canvas.height = Math.max(1, rows * cellSize);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return new THREE.CanvasTexture(canvas);
+  const srcRows = matrix.length;
+  const srcCols = matrix[0]?.length ?? 1;
+  const rows = transpose ? srcCols : srcRows;
+  const cols = transpose ? srcRows : srcCols;
 
-  let maxAbs = options?.maxAbs ?? 1e-6;
-  if (!options?.maxAbs && options?.isPreSoftmax) {
-    for (let i = 0; i < rows; i++) {
-      for (let j = 0; j < cols; j++) {
-        const v = matrix[i][j];
-        if (Number.isFinite(v) && Math.abs(v) > maxAbs) {
-          maxAbs = Math.abs(v);
-        }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.min(cols, 512));
+  canvas.height = Math.max(1, Math.min(rows, 512));
+  const ctx = canvas.getContext('2d')!;
+
+  let maxAbs = 1e-6;
+  let minVal = Infinity;
+  let maxVal = -Infinity;
+  for (let r = 0; r < srcRows; r++) {
+    const row = matrix[r];
+    for (let c = 0; c < srcCols; c++) {
+      const v = row[c];
+      if (v < minVal) minVal = v;
+      if (v > maxVal) maxVal = v;
+      const a = Math.abs(v);
+      if (a > maxAbs) maxAbs = a;
+    }
+  }
+  if (!Number.isFinite(minVal)) minVal = 0;
+  if (!Number.isFinite(maxVal)) maxVal = 1;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  for (let py = 0; py < h; py++) {
+    const r = Math.min(rows - 1, Math.floor((py / h) * rows));
+    for (let px = 0; px < w; px++) {
+      const c = Math.min(cols - 1, Math.floor((px / w) * cols));
+      const val = transpose ? matrix[c][r] : matrix[r][c];
+      if (mode === 'sequential') {
+        const norm = maxVal > minVal ? (val - minVal) / (maxVal - minVal) : 0;
+        ctx.fillStyle = sequentialColor(norm);
+      } else {
+        ctx.fillStyle = divergingColor(val / maxAbs);
       }
+      ctx.fillRect(px, py, 1, 1);
     }
   }
 
-  for (let i = 0; i < rows; i++) {
-    for (let j = 0; j < cols; j++) {
-      const v = matrix[i][j];
-      const x = j * cellSize;
-      const y = i * cellSize;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
 
-      if (!Number.isFinite(v) || v <= -9000) {
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(x, y, cellSize, cellSize);
-        continue;
-      }
+function drawRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const rad = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rad);
+  ctx.arcTo(x + w, y + h, x, y + h, rad);
+  ctx.arcTo(x, y + h, x, y, rad);
+  ctx.arcTo(x, y + x, x, y, rad);
+  ctx.closePath();
+}
 
-      ctx.fillStyle = options?.isPreSoftmax
-        ? divergingColor(v, maxAbs)
-        : sequentialColor(v);
-      ctx.fillRect(x, y, cellSize, cellSize);
-    }
+export function createLabelSpriteTexture(
+  primary: string,
+  secondary?: string,
+  accent = '#1d4ed8',
+  muted = false
+): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 440;
+  canvas.height = secondary ? 128 : 88;
+  const ctx = canvas.getContext('2d')!;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawRoundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 20);
+  ctx.fillStyle = muted
+    ? 'rgba(241, 245, 249, 0.94)'
+    : 'rgba(255, 255, 255, 0.96)';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = muted ? '#cbd5e1' : accent;
+  ctx.stroke();
+
+  ctx.fillStyle = muted ? '#64748b' : '#111827';
+  ctx.font =
+    '700 30px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(primary.slice(0, 26), canvas.width / 2, secondary ? 46 : 44);
+
+  if (secondary) {
+    ctx.fillStyle = muted ? '#b45309' : accent;
+    ctx.font = '600 22px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(secondary.slice(0, 32), canvas.width / 2, 90);
   }
 
   const tex = new THREE.CanvasTexture(canvas);
