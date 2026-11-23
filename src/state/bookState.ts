@@ -60,10 +60,46 @@ export function toggleHeadDisabled(
   };
 }
 
+export function hasResidualAblation(ablation: AblationConfig): boolean {
+  return (ablation.disabledResiduals?.length ?? 0) > 0;
+}
+
+export function toggleAllResiduals(ablation: AblationConfig): AblationConfig {
+  if (hasResidualAblation(ablation)) {
+    return { ...ablation, disabledResiduals: [] };
+  }
+  const all: ['attn' | 'mlp', number][] = [];
+  for (let l = 0; l < 4; l++) {
+    all.push(['attn', l], ['mlp', l]);
+  }
+  return { ...ablation, disabledResiduals: all };
+}
+
+export function isFinalLnDisabled(ablation: AblationConfig): boolean {
+  return (ablation.disabledLayerNorms ?? []).some(([kind]) => kind === 'ln_f');
+}
+
+export function toggleFinalLn(ablation: AblationConfig): AblationConfig {
+  const cur = ablation.disabledLayerNorms ?? [];
+  const exists = cur.some(([kind]) => kind === 'ln_f');
+  return {
+    ...ablation,
+    disabledLayerNorms: exists
+      ? cur.filter(([kind]) => kind !== 'ln_f')
+      : [...cur, ['ln_f', -1]],
+  };
+}
+
 export function ablationToParam(ablation: AblationConfig): string {
   const parts: string[] = [];
   for (const [l, h] of ablation.disabledHeads ?? []) parts.push(`h${l}_${h}`);
   for (const l of ablation.disabledLayers ?? []) parts.push(`l${l}`);
+  for (const [kind, l] of ablation.disabledResiduals ?? []) {
+    parts.push(`r${kind}_${l}`);
+  }
+  for (const [kind, l] of ablation.disabledLayerNorms ?? []) {
+    parts.push(`n${kind}_${l}`);
+  }
   return parts.length > 0 ? parts.join(',') : 'none';
 }
 
@@ -87,6 +123,28 @@ export function paramToAblation(raw: string | null): AblationConfig {
           clampInt(l, 0, 3),
         ];
       }
+    } else if (token.startsWith('r')) {
+      const [kind, lStr] = token.slice(1).split('_');
+      const l = Number(lStr);
+      if ((kind === 'attn' || kind === 'mlp') && Number.isFinite(l)) {
+        cfg.disabledResiduals = [
+          ...(cfg.disabledResiduals ?? []),
+          [kind, clampInt(l, 0, 3)],
+        ];
+      }
+    } else if (token.startsWith('n')) {
+      const idx = token.lastIndexOf('_');
+      const kind = token.slice(1, idx);
+      const l = Number(token.slice(idx + 1));
+      if (
+        (kind === 'ln_1' || kind === 'ln_2' || kind === 'ln_f') &&
+        Number.isFinite(l)
+      ) {
+        cfg.disabledLayerNorms = [
+          ...(cfg.disabledLayerNorms ?? []),
+          [kind, kind === 'ln_f' ? -1 : clampInt(l, 0, 3)],
+        ];
+      }
     }
   }
   return cfg;
@@ -101,7 +159,7 @@ function parseEdition(raw: string | null): Edition {
 export function stateFromUrl(search: string): BookState {
   const params = new URLSearchParams(search);
   const prompt = params.get('in') || DEFAULT_PROMPT;
-  const chapterId = clampInt(Number(params.get('ch') ?? '4'), 1, 8);
+  const chapterId = clampInt(Number(params.get('ch') ?? '1'), 1, 8);
   const beatIndex = clampInt(Number(params.get('beat') ?? '0'), 0, 5);
   const edition = parseEdition(params.get('ed'));
   const layer = clampInt(Number(params.get('block') ?? '2'), 0, 3);

@@ -173,16 +173,32 @@ export function BookReader({
               >
                 ← Previous Beat
               </button>
-              <button
-                type="button"
-                className="primary-btn"
-                disabled={beatIndex >= totalBeats - 1}
-                onClick={() => onSelectBeat(beatIndex + 1)}
-              >
-                {beatIndex < totalBeats - 1
-                  ? `Next: ${chapter.beats[beatIndex + 1].shortTitle} →`
-                  : 'End of Chapter 4'}
-              </button>
+              {beatIndex < totalBeats - 1 ? (
+                <button
+                  type="button"
+                  className="primary-btn"
+                  onClick={() => onSelectBeat(beatIndex + 1)}
+                >
+                  Next: {chapter.beats[beatIndex + 1].shortTitle} →
+                </button>
+              ) : (() => {
+                const nextCh = TEXTBOOK_CHAPTERS.find(
+                  (c) => c.id === chapter.id + 1
+                );
+                return nextCh && nextCh.status === 'ready' ? (
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => onSelectChapter(nextCh.id)}
+                  >
+                    Next Chapter: Ch. {nextCh.id} →
+                  </button>
+                ) : (
+                  <button type="button" className="primary-btn" disabled>
+                    End of Chapter {chapter.id}
+                  </button>
+                );
+              })()}
             </div>
           </article>
         )}
