@@ -136,10 +136,6 @@ export function sampleFromDistribution(dist: SampledToken[]): number {
   return dist[dist.length - 1]?.id ?? 0;
 }
 
-/**
- * Paint a real 2D numeric tensor directly onto a crisp Three.js CanvasTexture
- * so every 3D architectural slab displays genuine model activations.
- */
 export function createTensorTexture(
   matrix: number[][],
   mode: 'diverging' | 'sequential' = 'diverging',
@@ -227,10 +223,10 @@ export function createPlaqueTexture(
   const ctx = canvas.getContext('2d')!;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 20);
+  roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 18);
   ctx.fillStyle = muted
-    ? 'rgba(241, 245, 249, 0.92)'
-    : 'rgba(255, 255, 255, 0.94)';
+    ? 'rgba(241, 245, 249, 0.94)'
+    : 'rgba(255, 255, 255, 0.95)';
   ctx.fill();
   ctx.lineWidth = 3;
   ctx.strokeStyle = muted ? '#cbd5e1' : accent;
@@ -238,15 +234,15 @@ export function createPlaqueTexture(
 
   ctx.fillStyle = muted ? '#64748b' : '#141923';
   ctx.font =
-    '700 30px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    '700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(title.slice(0, 22), canvas.width / 2, subtitle ? 44 : 42);
+  ctx.fillText(title.slice(0, 24), canvas.width / 2, subtitle ? 44 : 42);
 
   if (subtitle) {
     ctx.fillStyle = muted ? '#b45309' : accent;
-    ctx.font = '600 22px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillText(subtitle.slice(0, 28), canvas.width / 2, 86);
+    ctx.font = '600 21px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(subtitle.slice(0, 30), canvas.width / 2, 86);
   }
 
   const tex = new THREE.CanvasTexture(canvas);

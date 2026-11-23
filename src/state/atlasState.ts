@@ -1,39 +1,19 @@
 import type { AblationConfig } from '../engine/types';
 
-export type StageId =
-  | 'overview'
-  | 'embed'
-  | 'block'
-  | 'attention'
-  | 'mlp'
-  | 'output';
-
-export type Register = 'intuitive' | 'technical' | 'math';
-
-export type DrawerId = 'none' | 'ablate' | 'weights' | 'training' | 'matrix';
+export type Register = 'simple' | 'sufficient' | 'complete';
 
 export interface AtlasState {
   prompt: string;
-  stage: StageId;
+  nodeId: string;
   layer: number;
   head: number;
   register: Register;
   ablation: AblationConfig;
   showPreSoftmax: boolean;
-  drawer: DrawerId;
   paramName: string;
   paramRow: number;
   paramCol: number;
 }
-
-export const STAGES: StageId[] = [
-  'overview',
-  'embed',
-  'block',
-  'attention',
-  'mlp',
-  'output',
-];
 
 export const DEFAULT_PROMPT =
   'Once upon a time, a little dog named Max found a red ball. He';
@@ -138,51 +118,33 @@ export function paramToAblation(raw: string | null): AblationConfig {
   return cfg;
 }
 
-function parseStage(raw: string | null): StageId {
-  if (raw && (STAGES as string[]).includes(raw)) return raw as StageId;
-  return 'overview';
-}
-
 function parseRegister(raw: string | null): Register {
-  if (raw === 'technical' || raw === 'curious' || raw === 'suff')
-    return 'technical';
-  if (raw === 'math' || raw === 'deep' || raw === 'comp') return 'math';
-  return 'intuitive';
+  if (raw === 'simple' || raw === 'simp' || raw === 'intuitive') return 'simple';
+  if (raw === 'complete' || raw === 'comp' || raw === 'math') return 'complete';
+  return 'sufficient';
 }
-
-const VALID_DRAWERS: DrawerId[] = [
-  'none',
-  'ablate',
-  'weights',
-  'training',
-  'matrix',
-];
 
 export function stateFromUrl(search: string): AtlasState {
   const params = new URLSearchParams(search);
   const prompt = params.get('in') || DEFAULT_PROMPT;
-  const stage = parseStage(params.get('stage'));
+  const nodeId = params.get('node') || 'root';
   const layer = clampIndex(Number(params.get('block') ?? '2'));
   const head = clampIndex(Number(params.get('head') ?? '3'));
   const register = parseRegister(params.get('reg'));
   const ablation = paramToAblation(params.get('abl'));
   const showPreSoftmax = params.get('raw') === '1';
-  const dRaw = params.get('drawer') as DrawerId | null;
-  const drawer: DrawerId =
-    dRaw && VALID_DRAWERS.includes(dRaw) ? dRaw : 'none';
   const paramName = params.get('param') || 'blocks.2.attn.W_k.weight';
   const paramRow = Math.max(0, Number(params.get('r') ?? '64') || 0);
   const paramCol = Math.max(0, Number(params.get('c') ?? '19') || 0);
 
   return {
     prompt,
-    stage,
+    nodeId,
     layer,
     head,
     register,
     ablation,
     showPreSoftmax,
-    drawer,
     paramName,
     paramRow,
     paramCol,
@@ -192,14 +154,13 @@ export function stateFromUrl(search: string): AtlasState {
 export function stateToSearch(state: AtlasState): string {
   const params = new URLSearchParams();
   params.set('in', state.prompt);
-  params.set('stage', state.stage);
+  params.set('node', state.nodeId);
   params.set('block', String(state.layer));
   params.set('head', String(state.head));
   params.set('reg', state.register);
   params.set('abl', ablationToParam(state.ablation));
   if (state.showPreSoftmax) params.set('raw', '1');
-  if (state.drawer !== 'none') params.set('drawer', state.drawer);
-  if (state.drawer === 'weights') {
+  if (state.nodeId === 'scalar') {
     params.set('param', state.paramName);
     params.set('r', String(state.paramRow));
     params.set('c', String(state.paramCol));

@@ -1,30 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  InspectorDrawers,
-  type TrainingReplayData,
-} from './components/InspectorDrawers';
-import {
-  CURRICULUM,
-  PRESET_PROMPTS,
-  registerLabel,
-} from './content/curriculum';
+import { AnatomyInspector } from './components/AnatomyInspector';
+import type { TrainingReplayData } from './components/NodeLab';
+import { getAnatomyNode, PRESET_PROMPTS } from './content/llmAnatomy';
 import { TransformerEngineClient } from './engine/client';
 import type {
+  AblationConfig,
   ActiveLayerTrace,
   EngineInitResult,
   EngineTraceResult,
 } from './engine/types';
-import { ArchitecturalWorld } from './scene/ArchitecturalWorld';
+import { ExplodedWorld } from './scene/ExplodedWorld';
 import {
   hasActiveAblation,
   isHeadDisabled,
-  STAGES,
   stateFromUrl,
   stateToSearch,
   type AtlasState,
-  type DrawerId,
   type Register,
-  type StageId,
 } from './state/atlasState';
 import {
   computeSampledDistribution,
@@ -36,11 +28,9 @@ import {
   vectorL2Norm,
 } from './utils/math';
 
-const REGISTERS: Register[] = ['intuitive', 'technical', 'math'];
-
 export function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const worldRef = useRef<ArchitecturalWorld | null>(null);
+  const worldRef = useRef<ExplodedWorld | null>(null);
   const clientRef = useRef<TransformerEngineClient | null>(null);
 
   const [state, setState] = useState<AtlasState>(() =>
@@ -55,12 +45,11 @@ export function App() {
   const [temperature, setTemperature] = useState<number>(0.8);
   const [topK, setTopK] = useState<number>(12);
   const [topP, setTopP] = useState<number>(0.9);
-  const [explainOpen, setExplainOpen] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync deep-linkable URL state
+  // Persist exact exploration state in URL
   useEffect(() => {
     const nextSearch = stateToSearch(state);
     if (window.location.search !== nextSearch) {
@@ -72,33 +61,32 @@ export function App() {
     }
   }, [state]);
 
-  // Mount Three.js Architectural World once
+  // Mount Three.js Exploded World once
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
-    const world = new ArchitecturalWorld(el, {
-      onSelectStage: (stage, layer) => {
+
+    const world = new ExplodedWorld(el, {
+      onSelectNode: (nodeId, layer) => {
         setState((prev) => ({
           ...prev,
-          stage,
+          nodeId,
           layer: typeof layer === 'number' ? layer : prev.layer,
         }));
-      },
-      onSelectHead: (head) => {
-        setState((prev) => ({ ...prev, head }));
       },
       onHoverToken: (idx) => {
         setHoveredTokenIdx(idx);
       },
     });
     worldRef.current = world;
+
     return () => {
       world.dispose();
       worldRef.current = null;
     };
   }, []);
 
-  // Boot verified TypeScript engine + load real weights & training replay
+  // Initialize verified Web Worker + load real weights & training replay
   useEffect(() => {
     const client = new TransformerEngineClient();
     clientRef.current = client;
@@ -127,7 +115,7 @@ export function App() {
     };
   }, []);
 
-  // Recompute real forward pass & ablation counterfactual on change
+  // Recompute real forward pass & ablation counterfactual when prompt or ablation changes
   useEffect(() => {
     const client = clientRef.current;
     if (!client || !initInfo) return;
@@ -140,6 +128,7 @@ export function App() {
         const baseRes = await client.trace(state.prompt);
         if (!alive) return;
         setBaseline(baseRes);
+
         if (hasActiveAblation(state.ablation)) {
           const ablRes = await client.trace(state.prompt, state.ablation);
           if (!alive) return;
@@ -162,11 +151,11 @@ export function App() {
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  // Push live trace & parameters into the 3D scene
+  // Keep 3D exploded scene synced with active node & live trace
   useEffect(() => {
     if (!worldRef.current || !initInfo || !baseline) return;
     worldRef.current.update({
-      stage: state.stage,
+      nodeId: state.nodeId,
       layer: state.layer,
       head: state.head,
       showPreSoftmax: state.showPreSoftmax,
@@ -183,7 +172,7 @@ export function App() {
     initInfo,
     baseline,
     ablated,
-    state.stage,
+    state.nodeId,
     state.layer,
     state.head,
     state.showPreSoftmax,
@@ -194,19 +183,70 @@ export function App() {
     topP,
   ]);
 
-  const setStage = useCallback((stage: StageId) => {
-    setState((prev) => ({ ...prev, stage, drawer: 'none' }));
+  // Keyboard shortcuts: Esc zooms up one parent folder, 1/2/3 switches register
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'Escape') {
+        setState((prev) => {
+          const cur = getAnatomyNode(prev.nodeId);
+          return cur.parentId ? { ...prev, nodeId: cur.parentId } : prev;
+        });
+      } else if (e.key === '1') {
+        setState((prev) => ({ ...prev, register: 'simple' }));
+      } else if (e.key === '2') {
+        setState((prev) => ({ ...prev, register: 'sufficient' }));
+      } else if (e.key === '3') {
+        setState((prev) => ({ ...prev, register: 'complete' }));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const toggleDrawer = useCallback((drawer: DrawerId) => {
+  const handleSelectNode = useCallback((nodeId: string) => {
+    setState((prev) => ({ ...prev, nodeId }));
+  }, []);
+
+  const handleChangeRegister = useCallback((register: Register) => {
+    setState((prev) => ({ ...prev, register }));
+  }, []);
+
+  const handleChangeAblation = useCallback((ablation: AblationConfig) => {
+    setState((prev) => ({ ...prev, ablation }));
+  }, []);
+
+  const handleInspectScalar = useCallback(
+    (paramName: string, paramRow: number, paramCol: number) => {
+      setState((prev) => ({
+        ...prev,
+        nodeId: 'scalar',
+        paramName,
+        paramRow,
+        paramCol,
+      }));
+    },
+    []
+  );
+
+  const handleTogglePreSoftmax = useCallback(() => {
     setState((prev) => ({
       ...prev,
-      drawer: prev.drawer === drawer ? 'none' : drawer,
+      showPreSoftmax: !prev.showPreSoftmax,
     }));
   }, []);
 
-  // Autoregressive +1 token step directly from the real sampled distribution
-  const handleStepAutoregressive = () => {
+  const handleChangeSampling = useCallback(
+    (patch: { temperature?: number; topK?: number; topP?: number }) => {
+      if (patch.temperature !== undefined) setTemperature(patch.temperature);
+      if (patch.topK !== undefined) setTopK(patch.topK);
+      if (patch.topP !== undefined) setTopP(patch.topP);
+    },
+    []
+  );
+
+  const handleStepAutoregressive = useCallback(() => {
     const active = ablated ?? baseline;
     if (!active || !initInfo) return;
     const dist = computeSampledDistribution(
@@ -221,13 +261,13 @@ export function App() {
     const nextPrompt = `${state.prompt}${piece}`;
     setDraftPrompt(nextPrompt);
     setState((prev) => ({ ...prev, prompt: nextPrompt }));
-  };
+  }, [ablated, baseline, initInfo, temperature, topK, topP, state.prompt]);
 
+  const activeNode = getAnatomyNode(state.nodeId);
   const activeTrace = ablated ?? baseline;
-  const spec = CURRICULUM[state.stage];
+  const ablationOn = hasActiveAblation(state.ablation);
 
-  // Live numeric telemetry lines specific to the current stage and real trace
-  const liveTelemetry = useMemo(() => {
+  const telemetryLines = useMemo(() => {
     if (!activeTrace || !initInfo) return [];
     const { trace, tokens } = activeTrace;
     const T = tokens.length;
@@ -236,32 +276,30 @@ export function App() {
     const topTok = formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '');
     const topProb = (trace.finalProbs[topId] * 100).toFixed(1);
 
-    if (state.stage === 'overview') {
+    if (activeNode.sceneView === 'embed') {
       return [
-        `Sequence: ${T} / ${initInfo.manifest.config.max_seq_len} tokens · ${initInfo.manifest.total_params.toLocaleString()} params · computed in ${activeTrace.elapsedMs}ms`,
-        `Top prediction: "${topTok}" (${topProb}%)${trace.inputLoss !== null ? ` · Prompt loss: ${trace.inputLoss.toFixed(3)}` : ''}`,
+        `Tokens: ${T} / ${initInfo.manifest.config.max_seq_len} · Last token: "${formatTokenExplicit(tokens[last].text)}" (#${tokens[last].id})`,
+        `||wte|| = ${formatNum(vectorL2Norm(trace.tokEmb[last]), 3)} · ||wpe[${last}]|| = ${formatNum(vectorL2Norm(trace.posEmb[last]), 3)}`,
       ];
     }
-    if (state.stage === 'embed') {
-      const embNorm = vectorL2Norm(trace.tokEmb[last]);
-      const posNorm = vectorL2Norm(trace.posEmb[last]);
-      return [
-        `Token #${last} ("${formatTokenExplicit(tokens[last].text)}", ID ${tokens[last].id})`,
-        `||wte|| = ${formatNum(embNorm, 3)} · ||wpe[${last}]|| = ${formatNum(posNorm, 3)} · output slab [${T} × 128]`,
-      ];
-    }
+
     const lt = trace.layers[state.layer];
-    if (lt.skipped) {
-      return [`Block ${state.layer} is skipped by Ablation Lab (identity pass-through).`];
-    }
-    const active: ActiveLayerTrace = lt;
-    if (state.stage === 'block') {
+    if (activeNode.sceneView === 'block') {
+      if (lt.skipped) {
+        return [`Block ${state.layer} is skipped by Ablation Lab (identity pass-through).`];
+      }
+      const active: ActiveLayerTrace = lt;
       return [
-        `Block ${state.layer} · ||h_in|| = ${formatNum(vectorL2Norm(active.residualBeforeAttn[last]), 2)} → +Attn (${formatNum(vectorL2Norm(active.attn.output[last]), 2)}) → +MLP (${formatNum(vectorL2Norm(active.mlp.output[last]), 2)})`,
+        `Block ${state.layer} · ||h_in||=${formatNum(vectorL2Norm(active.residualBeforeAttn[last]), 2)} → +Attn(${formatNum(vectorL2Norm(active.attn.output[last]), 2)}) → +MLP(${formatNum(vectorL2Norm(active.mlp.output[last]), 2)})`,
         `||h_out|| = ${formatNum(vectorL2Norm(active.residualAfterMlp[last]), 2)} · shape [${T} × 128]`,
       ];
     }
-    if (state.stage === 'attention') {
+
+    if (activeNode.sceneView === 'attention') {
+      if (lt.skipped) {
+        return [`Block ${state.layer} is skipped by Ablation Lab.`];
+      }
+      const active: ActiveLayerTrace = lt;
       const focusIdx = hoveredTokenIdx ?? last;
       const row = active.attn.attnWeights[state.head][focusIdx];
       let bestCol = 0;
@@ -269,33 +307,46 @@ export function App() {
         if (row[c] > row[bestCol]) bestCol = c;
       }
       const sum = row.reduce((a, b) => a + b, 0);
-      const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
+      const off = isHeadDisabled(state.ablation, state.layer, state.head);
       return [
-        `Block ${state.layer} Head ${state.head}${headOff ? ' (DISABLED)' : ''} · Query "${formatTokenExplicit(tokens[focusIdx].text)}" attends most to "${formatTokenExplicit(tokens[bestCol].text)}" (${(row[bestCol] * 100).toFixed(1)}%)`,
+        `Block ${state.layer} Head ${state.head}${off ? ' (OFF)' : ''} · "${formatTokenExplicit(tokens[focusIdx].text)}" attends most to "${formatTokenExplicit(tokens[bestCol].text)}" (${(row[bestCol] * 100).toFixed(1)}%)`,
         `Row softmax sum = ${sum.toFixed(6)} · Q, K, V shape [${T} × 32]`,
       ];
     }
-    if (state.stage === 'mlp') {
-      const activeNeurons = countActiveNeurons(active.mlp.hidden[last], 0.05);
+
+    if (activeNode.sceneView === 'mlp') {
+      if (lt.skipped) {
+        return [`Block ${state.layer} is skipped by Ablation Lab.`];
+      }
+      const active: ActiveLayerTrace = lt;
+      const firing = countActiveNeurons(active.mlp.hidden[last], 0.05);
       return [
-        `Block ${state.layer} MLP · Token "${formatTokenExplicit(tokens[last].text)}": ${activeNeurons} / 512 GELU neurons active (> 0.05)`,
-        `Expansion: 128 → 512 → 128 · ||Δmlp|| = ${formatNum(vectorL2Norm(active.mlp.output[last]), 2)}`,
+        `Block ${state.layer} MLP · Token "${formatTokenExplicit(tokens[last].text)}": ${firing} / 512 GELU neurons active (>0.05)`,
+        `||Δmlp|| = ${formatNum(vectorL2Norm(active.mlp.output[last]), 2)} · expansion 128 → 512 → 128`,
       ];
     }
-    const pool = computeSampledDistribution(
-      trace.finalLogits,
-      temperature,
-      topK,
-      topP
-    );
+
+    if (activeNode.sceneView === 'output') {
+      const pool = computeSampledDistribution(
+        trace.finalLogits,
+        temperature,
+        topK,
+        topP
+      );
+      return [
+        `Top logit: "${topTok}" z=${formatNum(trace.finalLogits[topId], 2)} → P=${topProb}%`,
+        `Sampling nucleus: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)})`,
+      ];
+    }
+
     return [
-      `Top logit: "${topTok}" z = ${formatNum(trace.finalLogits[topId], 2)} → raw P = ${topProb}%`,
-      `Active sampling pool: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)})`,
+      `${initInfo.manifest.total_params.toLocaleString()} real params · ${T} tokens · traced in ${activeTrace.elapsedMs}ms`,
+      `Next prediction: "${topTok}" (${topProb}%)${trace.inputLoss !== null ? ` · Prompt loss: ${trace.inputLoss.toFixed(3)}` : ''}`,
     ];
   }, [
     activeTrace,
     initInfo,
-    state.stage,
+    activeNode.sceneView,
     state.layer,
     state.head,
     state.ablation,
@@ -315,313 +366,25 @@ export function App() {
     }
   };
 
+  const showBlockSelector =
+    activeNode.sceneView === 'block' ||
+    activeNode.sceneView === 'attention' ||
+    activeNode.sceneView === 'mlp';
+
   return (
-    <div className="studio-viewport">
-      <div
-        ref={mountRef}
-        className="canvas-mount"
-        aria-label="Interactive 3D architectural miniature transformer"
-      />
-
-      {!initInfo && !error && (
-        <div className="loading-pill glass-panel">
-          Loading 862,464 real trained parameters...
-        </div>
-      )}
-      {error && <div className="error-toast">{error}</div>}
-
-      {/* Top Architectural Navigation + Labs */}
-      <header className="hud-top">
-        <nav className="hud-bar glass-panel" aria-label="Transformer stages">
-          <span className="brand-mark">LLM Atlas</span>
-          {STAGES.map((id) => (
-            <button
-              key={id}
-              type="button"
-              className={`stage-btn ${state.stage === id ? 'is-current' : ''}`}
-              onClick={() => setStage(id)}
-            >
-              {CURRICULUM[id].navLabel}
-            </button>
-          ))}
-        </nav>
-
-        <div className="hud-bar glass-panel">
-          <div className="lens-group" role="group" aria-label="Explanation register">
-            {REGISTERS.map((r) => (
-              <button
-                key={r}
-                type="button"
-                className={`lens-btn ${state.register === r ? 'is-active' : ''}`}
-                onClick={() => setState((prev) => ({ ...prev, register: r }))}
-              >
-                {registerLabel(r)}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            className={`pill-btn ${
-              state.drawer === 'ablate'
-                ? 'is-active'
-                : hasActiveAblation(state.ablation)
-                  ? 'is-warm'
-                  : ''
-            }`}
-            onClick={() => toggleDrawer('ablate')}
-          >
-            {hasActiveAblation(state.ablation) ? 'Ablation (on)' : 'Ablate'}
-          </button>
-          <button
-            type="button"
-            className={`pill-btn ${state.drawer === 'weights' ? 'is-active' : ''}`}
-            onClick={() => toggleDrawer('weights')}
-          >
-            Weights
-          </button>
-          <button
-            type="button"
-            className={`pill-btn ${state.drawer === 'training' ? 'is-active' : ''}`}
-            onClick={() => toggleDrawer('training')}
-          >
-            Training & Scale
-          </button>
-          <button type="button" className="pill-btn" onClick={() => void copyLink()}>
-            {copied ? 'Copied' : 'Share'}
-          </button>
-        </div>
-      </header>
-
-      {/* Bottom-Left Floating Curriculum + Live Numeric Telemetry */}
-      <aside className="explain-card glass-panel" aria-live="polite">
-        <div className="explain-head">
-          <h1 className="explain-title">{spec.title}</h1>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <span
-              className={`honesty-tag ${
-                spec.honestyKind === 'literal' ? 'is-literal' : 'is-structural'
-              }`}
-            >
-              {spec.honestyLabel}
-            </span>
-            <button
-              type="button"
-              className="pill-btn"
-              onClick={() => setExplainOpen((v) => !v)}
-            >
-              {explainOpen ? 'Hide' : 'Read'}
-            </button>
-          </div>
-        </div>
-
-        {explainOpen && (
-          <>
-            <p className="explain-prose">{spec.copy[state.register]}</p>
-
-            {liveTelemetry.length > 0 && (
-              <div className="telemetry-box mono">
-                {liveTelemetry.map((line, i) => (
-                  <div key={i}>{line}</div>
-                ))}
-              </div>
-            )}
-
-            {spec.nextStage && spec.nextQuestion && (
-              <div className="explain-next">
-                <span className="next-q">{spec.nextQuestion}</span>
-                <button
-                  type="button"
-                  className="cta-btn"
-                  onClick={() => setStage(spec.nextStage!)}
-                >
-                  {CURRICULUM[spec.nextStage].navLabel} →
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </aside>
-
-      {/* Bottom-Right Contextual Architectural Controls */}
-      <div className="stage-dock">
-        {(state.stage === 'block' ||
-          state.stage === 'attention' ||
-          state.stage === 'mlp') && (
-          <div className="dock-strip glass-panel">
-            <span className="dock-label">Block</span>
-            {[0, 1, 2, 3].map((l) => (
-              <button
-                key={l}
-                type="button"
-                className={`pill-btn mono ${state.layer === l ? 'is-active' : ''}`}
-                onClick={() => setState((prev) => ({ ...prev, layer: l }))}
-              >
-                {l}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {state.stage === 'attention' && (
-          <div className="dock-strip glass-panel">
-            <span className="dock-label">Head</span>
-            {[0, 1, 2, 3].map((h) => {
-              const off = isHeadDisabled(state.ablation, state.layer, h);
-              return (
-                <button
-                  key={h}
-                  type="button"
-                  className={`pill-btn mono ${
-                    off ? 'is-warm' : state.head === h ? 'is-active' : ''
-                  }`}
-                  onClick={() => setState((prev) => ({ ...prev, head: h }))}
-                >
-                  H{h}
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              className={`pill-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
-              onClick={() =>
-                setState((prev) => ({
-                  ...prev,
-                  showPreSoftmax: !prev.showPreSoftmax,
-                }))
-              }
-            >
-              {state.showPreSoftmax ? 'Raw QKᵀ/√32' : 'Softmax A'}
-            </button>
-            <button
-              type="button"
-              className={`pill-btn ${state.drawer === 'matrix' ? 'is-active' : ''}`}
-              onClick={() => toggleDrawer('matrix')}
-            >
-              Exact Table
-            </button>
-          </div>
-        )}
-
-        {state.stage === 'output' && (
-          <div className="dock-strip sampling-dock glass-panel">
-            <div className="mini-slider">
-              <div className="row-between">
-                <span>Temperature</span>
-                <span className="mono">{temperature.toFixed(2)}</span>
-              </div>
-              <input
-                type="range"
-                min={0.1}
-                max={2.0}
-                step={0.05}
-                value={temperature}
-                onChange={(e) => setTemperature(Number(e.target.value))}
-              />
-            </div>
-            <div className="mini-slider">
-              <div className="row-between">
-                <span>Top-k</span>
-                <span className="mono">{topK}</span>
-              </div>
-              <input
-                type="range"
-                min={1}
-                max={40}
-                step={1}
-                value={topK}
-                onChange={(e) => setTopK(Number(e.target.value))}
-              />
-            </div>
-            <div className="mini-slider">
-              <div className="row-between">
-                <span>Top-p (Nucleus)</span>
-                <span className="mono">{topP.toFixed(2)}</span>
-              </div>
-              <input
-                type="range"
-                min={0.1}
-                max={1.0}
-                step={0.05}
-                value={topP}
-                onChange={(e) => setTopP(Number(e.target.value))}
-              />
-            </div>
-            <button
-              type="button"
-              className="cta-btn"
-              disabled={busy || !activeTrace}
-              onClick={handleStepAutoregressive}
-            >
-              Step +1 Token (Autoregressive)
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Educational Labs Drawer */}
-      {initInfo && baseline && clientRef.current && (
-        <InspectorDrawers
-          drawer={state.drawer}
-          client={clientRef.current}
-          manifest={initInfo.manifest}
-          tokenizer={initInfo.tokenizer}
-          baseline={baseline}
-          ablated={ablated}
-          ablation={state.ablation}
-          layer={state.layer}
-          head={state.head}
-          showPreSoftmax={state.showPreSoftmax}
-          hoveredTokenIdx={hoveredTokenIdx}
-          replay={replay}
-          paramName={state.paramName}
-          paramRow={state.paramRow}
-          paramCol={state.paramCol}
-          onChangeAblation={(ablation) =>
-            setState((prev) => ({ ...prev, ablation }))
-          }
-          onSelectParam={(paramName, paramRow, paramCol) =>
-            setState((prev) => ({
-              ...prev,
-              drawer: 'weights',
-              paramName,
-              paramRow,
-              paramCol,
-            }))
-          }
-          onTogglePreSoftmax={() =>
-            setState((prev) => ({
-              ...prev,
-              showPreSoftmax: !prev.showPreSoftmax,
-            }))
-          }
-          onHoverToken={setHoveredTokenIdx}
-          onClose={() => setState((prev) => ({ ...prev, drawer: 'none' }))}
-        />
-      )}
-
-      {/* Bottom Sentence Input & Interactive BPE Token Strip */}
-      <div className="hud-bottom">
-        {activeTrace && (
-          <div className="token-ribbon" aria-label="BPE Tokens">
-            {activeTrace.tokens.map((tok, idx) => (
-              <button
-                key={`${tok.start}-${idx}`}
-                type="button"
-                className={`tok-chip mono ${
-                  hoveredTokenIdx === idx ? 'is-hover' : ''
-                }`}
-                onMouseEnter={() => setHoveredTokenIdx(idx)}
-                onMouseLeave={() => setHoveredTokenIdx(null)}
-                title={`Slot ${idx} · Token ID #${tok.id} · chars [${tok.start}, ${tok.end})`}
-              >
-                {formatToken(tok.text)}
-              </button>
-            ))}
-          </div>
-        )}
+    <div className="app-shell">
+      <header className="topbar">
+        <button
+          type="button"
+          className="brand-btn"
+          onClick={() => handleSelectNode('root')}
+          title="Zoom out to the complete LLM"
+        >
+          LLM Atlas
+        </button>
 
         <form
-          className="sentence-bar glass-panel"
+          className="prompt-form"
           onSubmit={(e) => {
             e.preventDefault();
             if (!draftPrompt.trim()) return;
@@ -629,16 +392,16 @@ export function App() {
           }}
         >
           <input
-            className="sentence-input"
+            className="prompt-input"
             value={draftPrompt}
             onChange={(e) => setDraftPrompt(e.target.value)}
-            placeholder="Type any sentence to run a live forward pass..."
+            placeholder="Type any sentence to trace live..."
             aria-label="Prompt sentence"
           />
           <select
-            className="select-pill"
+            className="preset-select"
             value=""
-            aria-label="Choose an example prompt"
+            aria-label="Example prompts"
             onChange={(e) => {
               const p = PRESET_PROMPTS.find((x) => x.id === e.target.value);
               if (!p) return;
@@ -653,10 +416,165 @@ export function App() {
               </option>
             ))}
           </select>
-          <button type="submit" className="cta-btn" disabled={busy || !initInfo}>
+          <button type="submit" className="primary-btn" disabled={busy || !initInfo}>
             {busy ? 'Tracing...' : 'Run'}
           </button>
         </form>
+
+        <div className="topbar-actions">
+          <button
+            type="button"
+            className={`mini-btn ${ablationOn ? 'is-warm' : state.nodeId === 'ablation' ? 'is-active' : ''}`}
+            onClick={() => handleSelectNode('ablation')}
+          >
+            {ablationOn ? 'Ablation (on)' : 'Ablate'}
+          </button>
+          <button
+            type="button"
+            className="mini-btn"
+            onClick={() => void copyLink()}
+          >
+            {copied ? 'Copied' : 'Share'}
+          </button>
+        </div>
+      </header>
+
+      <div className="split-workspace">
+        <section className="stage-pane" aria-label="Interactive 3D exploded LLM">
+          <div ref={mountRef} className="canvas-mount" />
+
+          {!initInfo && !error && (
+            <div className="loading-overlay">
+              Loading 862,464 real trained parameters...
+            </div>
+          )}
+          {error && <div className="error-banner">{error}</div>}
+
+          <div className="stage-hud-top">
+            <div className="stage-pill-group">
+              {state.nodeId !== 'root' && (
+                <button
+                  type="button"
+                  className="mini-btn"
+                  onClick={() => handleSelectNode('root')}
+                >
+                  Zoom Out (Full LLM)
+                </button>
+              )}
+
+              {showBlockSelector && (
+                <>
+                  <span className="stage-pill-label">Block</span>
+                  {[0, 1, 2, 3].map((l) => (
+                    <button
+                      key={l}
+                      type="button"
+                      className={`mini-btn mono ${state.layer === l ? 'is-active' : ''}`}
+                      onClick={() => setState((prev) => ({ ...prev, layer: l }))}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </>
+              )}
+
+              {activeNode.sceneView === 'attention' && (
+                <>
+                  <span className="stage-pill-label">Head</span>
+                  {[0, 1, 2, 3].map((h) => {
+                    const off = isHeadDisabled(state.ablation, state.layer, h);
+                    return (
+                      <button
+                        key={h}
+                        type="button"
+                        className={`mini-btn mono ${
+                          off ? 'is-warm' : state.head === h ? 'is-active' : ''
+                        }`}
+                        onClick={() => setState((prev) => ({ ...prev, head: h }))}
+                      >
+                        H{h}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+
+            {ablationOn && (
+              <div className="stage-pill-group">
+                <span className="stage-pill-label">Ablation active</span>
+                <button
+                  type="button"
+                  className="mini-btn is-warm"
+                  onClick={() => handleChangeAblation({})}
+                >
+                  Reset
+                </button>
+              </div>
+            )}
+          </div>
+
+          {activeTrace && (
+            <div className="stage-hud-bottom">
+              <div className="token-strip-float" aria-label="Prompt tokens">
+                {activeTrace.tokens.map((tok, idx) => (
+                  <button
+                    key={`${tok.start}-${idx}`}
+                    type="button"
+                    className={`tok-badge mono ${
+                      hoveredTokenIdx === idx ? 'is-hover' : ''
+                    }`}
+                    onMouseEnter={() => setHoveredTokenIdx(idx)}
+                    onMouseLeave={() => setHoveredTokenIdx(null)}
+                    title={`Slot ${idx} · Token #${tok.id}`}
+                  >
+                    {formatToken(tok.text)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {initInfo && baseline && clientRef.current ? (
+          <AnatomyInspector
+            nodeId={state.nodeId}
+            register={state.register}
+            telemetryLines={telemetryLines}
+            client={clientRef.current}
+            manifest={initInfo.manifest}
+            tokenizer={initInfo.tokenizer}
+            baseline={baseline}
+            ablated={ablated}
+            ablation={state.ablation}
+            layer={state.layer}
+            head={state.head}
+            showPreSoftmax={state.showPreSoftmax}
+            hoveredTokenIdx={hoveredTokenIdx}
+            replay={replay}
+            paramName={state.paramName}
+            paramRow={state.paramRow}
+            paramCol={state.paramCol}
+            temperature={temperature}
+            topK={topK}
+            topP={topP}
+            busy={busy}
+            onSelectNode={handleSelectNode}
+            onChangeRegister={handleChangeRegister}
+            onChangeAblation={handleChangeAblation}
+            onInspectScalar={handleInspectScalar}
+            onTogglePreSoftmax={handleTogglePreSoftmax}
+            onHoverToken={setHoveredTokenIdx}
+            onChangeSampling={handleChangeSampling}
+            onStepAutoregressive={handleStepAutoregressive}
+          />
+        ) : (
+          <aside className="inspector-rail">
+            <div className="inspector-scroll muted-sm">
+              Initializing verified miniature transformer engine...
+            </div>
+          </aside>
+        )}
       </div>
     </div>
   );
