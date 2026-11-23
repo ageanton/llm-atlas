@@ -180,7 +180,7 @@ function drawRoundRect(
   ctx.arcTo(x + w, y, x + w, y + h, rad);
   ctx.arcTo(x + w, y + h, x, y + h, rad);
   ctx.arcTo(x, y + h, x, y, rad);
-  ctx.arcTo(x, y + x, x, y, rad);
+  ctx.arcTo(x, y, x + w, y, rad);
   ctx.closePath();
 }
 

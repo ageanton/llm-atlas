@@ -156,23 +156,25 @@ export function App() {
   const { resolvedQueryIdx, resolvedKeyIdx } = useMemo(() => {
     if (!activeTrace) return { resolvedQueryIdx: 0, resolvedKeyIdx: 0 };
     const T = activeTrace.tokens.length;
-    const q = clampInt(state.queryIdx ?? T - 1, 0, Math.max(0, T - 1));
+    const q = clampInt(state.queryIdx ?? T - 1, 0, T - 1);
 
-    if (state.keyIdx !== null && Number.isFinite(state.keyIdx)) {
-      return { resolvedQueryIdx: q, resolvedKeyIdx: clampInt(state.keyIdx, 0, Math.max(0, T - 1)) };
+    if (state.keyIdx !== null) {
+      return {
+        resolvedQueryIdx: q,
+        resolvedKeyIdx: clampInt(state.keyIdx, 0, q),
+      };
     }
 
-    // Default Key: pick the earlier token with highest attention weight from q, or slot 6 ("Max")
+    // Default Key: look for "Max" or highest-attended earlier token in this head
     const lt = activeTrace.trace.layers[state.layer];
     let bestK = Math.max(0, q - 1);
-    if (!lt.skipped) {
-      const active: ActiveLayerTrace = lt;
-      const weights = active.attn.attnWeights[state.head][q] ?? [];
-      let maxW = -1;
-      for (let k = 0; k < q; k++) {
-        if (weights[k] > maxW) {
-          maxW = weights[k];
-          bestK = k;
+    if (!lt.skipped && q > 0) {
+      const row = lt.attn.attnWeights[state.head][q];
+      let bestW = -1;
+      for (let c = 0; c < q; c++) {
+        if (row[c] > bestW) {
+          bestW = row[c];
+          bestK = c;
         }
       }
     }
@@ -316,8 +318,15 @@ export function App() {
           : ''
       }`,
     ];
-    if (off) {
-      lines.push('Observe how zeroing Head 3 shifts next-token probabilities!');
+    if (
+      ablated &&
+      baseline.trace.inputLoss !== null &&
+      ablated.trace.inputLoss !== null
+    ) {
+      const dLoss = ablated.trace.inputLoss - baseline.trace.inputLoss;
+      lines.push(
+        `Prompt cross-entropy loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dLoss >= 0 ? '+' : ''}${dLoss.toFixed(3)})`
+      );
     }
     return lines;
   }, [
@@ -325,171 +334,152 @@ export function App() {
     baseline,
     ablated,
     initInfo,
+    activeSceneBeat,
     state.layer,
     state.head,
+    state.ablation,
     resolvedQueryIdx,
     resolvedKeyIdx,
-    activeSceneBeat,
-    state.ablation,
   ]);
 
-  const activeTokens = activeTrace?.tokens ?? [];
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
 
   return (
-    <div className={`app-root ${state.lectureMode ? 'is-lecture' : ''}`}>
-      {/* Top Application Bar */}
-      <header className="top-navbar">
-        <div className="nav-left">
-          <span className="brand-badge">LLM Atlas</span>
-          <span className="brand-pill">Interactive Textbook</span>
-          <span className="parity-badge">100% PyTorch Parity</span>
+    <div className="book-app">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <span className="brand-title">LLM Atlas</span>
+          <span className="brand-tag">Interactive Transformer Textbook</span>
         </div>
 
-        <div className="nav-center">
-          <form
-            className="prompt-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (draftPrompt.trim()) {
-                setState((prev) => ({
-                  ...prev,
-                  prompt: draftPrompt.trim(),
-                  queryIdx: null,
-                  keyIdx: null,
-                }));
-              }
-            }}
-          >
-            <input
-              type="text"
-              className="prompt-input mono"
-              value={draftPrompt}
-              onChange={(e) => setDraftPrompt(e.target.value)}
-              placeholder="Type any sentence to see real tensors..."
-            />
-            <button
-              type="submit"
-              className="primary-btn"
-              disabled={busy || !initInfo}
-            >
-              {busy ? 'Running...' : 'Run Trace'}
-            </button>
-          </form>
-        </div>
-
-        <div className="nav-right">
+        <form
+          className="prompt-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!draftPrompt.trim()) return;
+            setState((prev) => ({
+              ...prev,
+              prompt: draftPrompt,
+              queryIdx: null,
+              keyIdx: null,
+            }));
+          }}
+        >
+          <input
+            className="prompt-input"
+            value={draftPrompt}
+            onChange={(e) => setDraftPrompt(e.target.value)}
+            placeholder="Type any sentence to test live..."
+            aria-label="Prompt sentence"
+          />
           <select
             className="preset-select"
-            aria-label="Preset teaching prompts"
             value=""
+            aria-label="Example prompts"
             onChange={(e) => {
               const p = PRESET_PROMPTS.find((x) => x.id === e.target.value);
-              if (p) {
-                setDraftPrompt(p.text);
-                setState((prev) => ({
-                  ...prev,
-                  prompt: p.text,
-                  queryIdx: null,
-                  keyIdx: null,
-                }));
-              }
+              if (!p) return;
+              setDraftPrompt(p.text);
+              setState((prev) => ({
+                ...prev,
+                prompt: p.text,
+                queryIdx: null,
+                keyIdx: null,
+              }));
             }}
           >
-            <option value="" disabled>
-              Select Teaching Example…
-            </option>
+            <option value="">Examples...</option>
             {PRESET_PROMPTS.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.label}
               </option>
             ))}
           </select>
-
-          <button
-            type="button"
-            className="outline-btn"
-            onClick={() => {
-              navigator.clipboard.writeText(window.location.href);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 2000);
-            }}
-          >
-            {copied ? 'Copied Link!' : 'Share'}
+          <button type="submit" className="primary-btn" disabled={busy || !initInfo}>
+            {busy ? 'Tracing...' : 'Run'}
           </button>
+        </form>
 
+        <div className="topbar-right">
           <button
             type="button"
-            className={`outline-btn ${state.lectureMode ? 'is-active' : ''}`}
+            className={`mini-btn ${state.lectureMode ? 'is-active' : ''}`}
             onClick={() =>
-              setState((prev) => ({
-                ...prev,
-                lectureMode: !prev.lectureMode,
-              }))
+              setState((prev) => ({ ...prev, lectureMode: !prev.lectureMode }))
             }
           >
-            {state.lectureMode ? 'Reader + 3D' : 'Lecture 3D'}
+            {state.lectureMode ? 'Show Book' : 'Lecture Mode'}
+          </button>
+          <button type="button" className="mini-btn" onClick={() => void copyLink()}>
+            {copied ? 'Copied' : 'Share'}
           </button>
         </div>
       </header>
 
-      {/* Main Split Screen */}
-      <div className="main-workspace">
-        {/* Left Column: Interactive Textbook Reader */}
-        {!state.lectureMode && (
-          <BookReader
-            chapter={chapter}
-            beat={activeBeat}
-            beatIndex={state.beatIndex}
-            edition={state.edition}
-            showContents={showContents}
-            liveCardLines={liveCardLines}
-            onToggleContents={() => setShowContents((v) => !v)}
-            onSelectChapter={(id) => {
-              setState((prev) => ({
-                ...prev,
-                chapterId: id,
-                beatIndex: 0,
-                queryIdx: null,
-                keyIdx: null,
-              }));
-              setShowContents(false);
-            }}
-            onSelectBeat={(idx) => setState((prev) => ({ ...prev, beatIndex: idx }))}
-            onChangeEdition={(ed) => setState((prev) => ({ ...prev, edition: ed }))}
-          />
-        )}
+      <div className={`workspace ${state.lectureMode ? 'is-lecture' : ''}`}>
+        <BookReader
+          chapter={chapter}
+          beat={activeBeat}
+          beatIndex={state.beatIndex}
+          edition={state.edition}
+          showContents={showContents}
+          liveCardLines={liveCardLines}
+          onToggleContents={() => setShowContents((v) => !v)}
+          onSelectChapter={(chapterId) => {
+            setShowContents(false);
+            setState((prev) => ({ ...prev, chapterId, beatIndex: 0 }));
+          }}
+          onSelectBeat={(beatIndex) =>
+            setState((prev) => ({ ...prev, beatIndex }))
+          }
+          onChangeEdition={(edition) =>
+            setState((prev) => ({ ...prev, edition }))
+          }
+        />
 
-        {/* Right Column: 3D Sunlit Architectural Stage */}
         <section className="stage-pane" aria-label="Interactive 3D Stage">
-          <div ref={mountRef} className="three-container" />
+          <div ref={mountRef} className="canvas-mount" />
 
-          {/* Top HUD Controls */}
-          <div className="stage-top-hud">
-            <div className="hud-pill-group">
-              <span className="hud-title">Block:</span>
+          {!initInfo && !error && (
+            <div className="loading-pill">
+              Loading 862,464 real trained parameters...
+            </div>
+          )}
+          {error && <div className="error-toast">{error}</div>}
+
+          <div className="stage-hud-top">
+            <div className="hud-group">
+              <span className="hud-label">Block</span>
               {[0, 1, 2, 3].map((l) => (
                 <button
                   key={l}
                   type="button"
-                  className={`mini-pill mono ${state.layer === l ? 'is-active' : ''}`}
+                  className={`mini-btn mono ${state.layer === l ? 'is-active' : ''}`}
                   onClick={() => setState((prev) => ({ ...prev, layer: l }))}
                 >
-                  L{l}
+                  {l}
                 </button>
               ))}
 
-              <span className="hud-title" style={{ marginLeft: 6 }}>
-                Head:
-              </span>
+              <span className="hud-label">Head</span>
               {[0, 1, 2, 3].map((h) => {
                 const off = isHeadDisabled(state.ablation, state.layer, h);
                 return (
                   <button
                     key={h}
                     type="button"
-                    className={`mini-pill mono ${
-                      off ? 'is-warn' : state.head === h ? 'is-active' : ''
+                    className={`mini-btn mono ${
+                      off ? 'is-warm' : state.head === h ? 'is-active' : ''
                     }`}
                     onClick={() => setState((prev) => ({ ...prev, head: h }))}
                   >
@@ -501,7 +491,7 @@ export function App() {
               {activeSceneBeat === 'attn-4-mask-softmax' && (
                 <button
                   type="button"
-                  className={`mini-pill ${state.showPreSoftmax ? 'is-active' : ''}`}
+                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -509,7 +499,7 @@ export function App() {
                     }))
                   }
                 >
-                  {state.showPreSoftmax ? 'Raw Logits' : 'Softmax %'}
+                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}
                 </button>
               )}
 
@@ -517,7 +507,7 @@ export function App() {
                 activeSceneBeat === 'attn-6-multihead-full') && (
                 <button
                   type="button"
-                  className={`mini-pill ${headOff ? 'is-warn' : ''}`}
+                  className={`mini-btn ${headOff ? 'is-warm' : ''}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -529,16 +519,16 @@ export function App() {
                     }))
                   }
                 >
-                  {headOff ? `Re-enable H${state.head}` : `Ablate H${state.head}`}
+                  {headOff ? `Re-enable H${state.head}` : `Disable H${state.head}`}
                 </button>
               )}
             </div>
 
-            <div className="hud-pill-group">
+            <div className="hud-group">
               {hasActiveAblation(state.ablation) && (
                 <button
                   type="button"
-                  className="mini-pill is-warn"
+                  className="mini-btn is-warm"
                   onClick={() => setState((prev) => ({ ...prev, ablation: {} }))}
                 >
                   Reset Ablation
@@ -546,55 +536,56 @@ export function App() {
               )}
               <button
                 type="button"
-                className="mini-pill"
+                className="mini-btn"
                 onClick={() => stageRef.current?.resetCamera()}
               >
-                Reset Camera
+                Reset View
               </button>
             </div>
           </div>
 
-          {/* Bottom HUD: Sequence Token Bar */}
-          {activeTokens.length > 0 && (
-            <div className="stage-bottom-hud">
-              <div className="token-strip" aria-label="Select active token">
-                <span className="hud-title">
+          {activeTrace && (
+            <div className="stage-hud-bottom">
+              <div className="token-bar" aria-label="Select Query or Key token">
+                <span className="hud-label">
                   {activeSceneBeat === 'attn-2-dot-product'
-                    ? 'Comparing Key:'
+                    ? 'Compare Key:'
                     : 'Query Token:'}
                 </span>
-                {activeTokens.map((tok, idx) => {
+                {activeTrace.tokens.map((tok, idx) => {
                   const isQ = idx === resolvedQueryIdx;
                   const isK =
-                    activeSceneBeat === 'attn-2-dot-product' && idx === resolvedKeyIdx;
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx === resolvedKeyIdx;
+                  const disabledKey =
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx > resolvedQueryIdx;
                   return (
                     <button
                       key={`${tok.start}-${idx}`}
                       type="button"
-                      className={`token-btn mono ${isQ ? 'is-query' : ''} ${
+                      disabled={disabledKey}
+                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${
                         isK ? 'is-key' : ''
                       }`}
                       onClick={() =>
                         setState((prev) =>
                           activeSceneBeat === 'attn-2-dot-product'
                             ? { ...prev, keyIdx: idx }
-                            : { ...prev, queryIdx: idx }
+                            : { ...prev, queryIdx: idx, keyIdx: null }
                         )
                       }
-                      title={`Token ${idx}: "${formatTokenExplicit(tok.text)}"`}
                     >
                       {formatToken(tok.text)}
                     </button>
                   );
                 })}
               </div>
-              <div className="camera-guide">
-                Drag to orbit · Right-drag or 2-finger drag to pan · Scroll to zoom · Click any token to inspect
+              <div className="camera-hint">
+                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
               </div>
             </div>
           )}
-
-          {error && <div className="stage-error mono">{error}</div>}
         </section>
       </div>
     </div>

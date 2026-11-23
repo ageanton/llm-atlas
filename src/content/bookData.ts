@@ -68,339 +68,260 @@ export const PRESET_PROMPTS: PresetPrompt[] = [
 
 export const CHAPTER_4_BEATS: BookBeat[] = [
   {
-    id: 'c4-b1-problem',
+    id: 'attn-beat-1',
     beatNumber: 1,
-    shortTitle: '1. The Bottleneck',
-    heading: 'The Addressing Bottleneck & The Three Roles (Q, K, V)',
+    shortTitle: '1. The Problem',
+    heading: 'Why Words Cannot Think Alone',
     sceneBeat: 'attn-1-problem',
     visualFocusNote:
-      'Scene shows the query token projecting into three distinct 16-dimensional vectors for Head 3: Query, Key, and Value.',
+      'Only your sentence is on stage. Notice the highlighted Query token sitting in isolation with no arrows connecting it to earlier context.',
     paragraphs: {
       foundations: [
-        'Before tokens can exchange information, each token sits isolated inside its own 64-dimensional vector. At the prompt end, the pronoun "He" needs to know what noun it refers to. But a single vector cannot simultaneously declare what it is searching for, advertise its own attributes to future tokens, and supply factual content.',
-        'Attention solves this by giving every token three distinct projection heads per attention block: Query ("what kind of information am I looking for?"), Key ("what attributes do I advertise to other words?"), and Value ("what content will I transmit if selected?").',
-        'Look at the three projected strips below. Even though they all originate from the same token embedding, the learned weight matrices project them into completely different geometric roles.',
+        'Look at the final token highlighted in blue on the 3D stage. Right now, the model only has that token’s generic dictionary entry plus its slot number in the sentence.',
+        'If the token is "He", its dictionary entry has no idea whether "He" is a dog named Max, a pirate captain, or a toaster. Every other part of a Transformer only looks at one word at a time. To predict what happens next in the story, "He" needs a way to reach backward and pull information from earlier words.',
+        'That single job—letting each token look back at earlier tokens and borrow their meaning—is what Self-Attention was invented to solve.',
       ],
       practitioner: [
-        'Input activations x ∈ ℝ^{T × 64} are multiplied by W_q, W_k, W_v ∈ ℝ^{64 × 64} to produce the full multi-head Q, K, V tensors. For Head h, the projection produces slices q_h, k_h, v_h ∈ ℝ^{T × 16}.',
-        'Decoupling Query and Key projections is essential: without distinct W_q and W_k, the similarity matrix Q K^T would be symmetric, making it mathematically impossible for token i to attend strongly to token j without token j attending equally back to token i.',
-        'In the 3D studio, the gold, emerald, and amber columns show the 16 real scalar activations for the active Query token under the verified miniature weights.',
+        'Entering Block l, every token t holds a residual vector h_t of shape [128] that initially only encodes its own token embedding plus positional offset (and any updates from earlier layers).',
+        'LayerNorm and the Feed-Forward MLP operate strictly row-wise on each token in isolation. Multi-Head Self-Attention is the only operation in the entire Transformer architecture where information can cross between different sequence positions t_1 and t_2.',
+        'Before we look at any [T, T] matrix, click Next Beat to watch the model compare just ONE query token against ONE earlier key token.',
       ],
       formal: [
-        'Let x_t ∈ ℝ^{d_{model}} denote the residual stream activation at position t, with d_{model} = 64. For each head h ∈ {0..3}, linear transformations W_{q,h}, W_{k,h}, W_{v,h} ∈ ℝ^{d_{head} × d_{model}} (with d_{head} = 16) define affine embeddings into distinct metric subspaces.',
-        'The query vector q_{t,h} = W_{q,h} x_t and key vector k_{t,h} = W_{k,h} x_t span an asymmetric bilinear retrieval manifold. Information transmission is governed strictly by the value manifold v_{t,h} = W_{v,h} x_t.',
-        'Because rank(W_{q,h}^T W_{k,h}) ≤ d_{head} = 16 ≪ d_{model}, each head isolates an independent 16-dimensional semantic query subspace, bypassing interference in the remaining 48 dimensions.',
+        'Let H ∈ R^{T × d_model} denote the normalized residual stream entering layer l. Position-wise maps (LN, MLP, unembedding) act identically across rows t ∈ {0, ..., T-1}, leaving tokens statistically decoupled.',
+        'Self-Attention introduces a data-dependent mixing operator over the sequence axis, computing a dynamic weighted graph whose edge strengths depend on the content and position of the input tokens themselves rather than fixed convolutional offsets.',
       ],
     },
     keyTakeaway: {
       foundations:
-        'A token cannot use the same vector to ask questions, answer questions, and deliver payload. Q searches, K matches, V delivers.',
+        'Self-Attention is the only meeting room in an LLM where words can talk to earlier words.',
       practitioner:
-        'Asymmetric Q and K projections allow directed, non-symmetric information flow between past and future positions.',
+        'Cross-token communication happens exclusively inside Self-Attention; all other layers are strictly per-token.',
       formal:
-        'Decoupled linear maps W_q and W_k induce a non-symmetric bilinear form q^T k = x_i^T (W_q^T W_k) x_j over the residual stream.',
+        'Self-Attention supplies the sequence-axis coupling required for contextual representations H_t = f(x_0, ..., x_t).',
     },
     predict: {
-      id: 'predict-c4-b1',
+      id: 'ch4-b1-predict',
       question:
-        'What would happen if a model used the EXACT same projection weights for Query and Key (W_q = W_k)?',
+        'To predict the word right after "He" in Max’s story, why isn’t the dictionary embedding of "He" enough by itself?',
       options: [
         {
-          id: 'opt-a',
-          label: 'The similarity matrix would be symmetric, forcing A(i→j) = A(j→i).',
+          id: 'a',
+          label: 'Because "He" has not yet been linked to earlier context like "dog", "Max", and "ball".',
         },
         {
-          id: 'opt-b',
-          label: 'Attention weights would instantly collapse to NaN.',
+          id: 'b',
+          label: 'Because the embedding table does not store pronouns.',
         },
         {
-          id: 'opt-c',
-          label: 'The model could no longer generate words autoregressively.',
+          id: 'c',
+          label: 'Because pronouns are always masked out.',
         },
       ],
-      correctId: 'opt-a',
+      correctId: 'a',
       explanation:
-        'If W_q = W_k, then q_i · k_j = x_i^T W^T W x_j = (x_j^T W^T W x_i)^T = q_j · k_i. Token "He" could never attend to "Max" without "Max" attending equally back to "He".',
+        'Exactly. The embedding of "He" is identical in every story until Attention pulls clues from earlier tokens.',
     },
   },
   {
-    id: 'c4-b2-dot-product',
+    id: 'attn-beat-2',
     beatNumber: 2,
-    shortTitle: '2. One Comparison',
-    heading: 'The Dot Product: Testing Alignment Across 16 Dimensions',
+    shortTitle: '2. One Comparison (Q · K)',
+    heading: 'One Single Pair: How Query Meets Key',
     sceneBeat: 'attn-2-dot-product',
     visualFocusNote:
-      'Scene isolates the 16 coordinate-wise products q_c · k_c between Query ("He") and the selected Key token.',
+      'The matrix is still hidden. On stage are ONLY two real 32-number strips from your model: the Query vector of one token, the Key vector of one earlier token, and the 32 element-wise products between them.',
     paragraphs: {
       foundations: [
-        'How does the model decide whether "He" should pay attention to "Max" versus "ball"? It takes the 16 numbers of Q("He") and multiplies each coordinate with the corresponding number of K("Max"), then sums all 16 products together.',
-        'When two coordinates have the same sign (both positive or both negative), their product is positive—a vote for relevance. When coordinates have opposite signs, their product is negative—a vote against relevance.',
-        'In the 3D scene below, notice the coordinate beams. Positive products rise in blue; negative products drop in amber. The sum of these 16 products is the raw dot product score.',
+        'Instead of comparing every word at once, let’s zoom all the way into ONE pair of words. Before comparing, the model turns each word into two 32-number lists: a Query ("what kind of clue am I looking for?") and a Key ("what kind of name-tag do I advertise?").',
+        'Look at the two 32-bar strips facing each other on the 3D stage. To check if they match, the model multiplies bar #0 by bar #0, bar #1 by bar #1, all the way to bar #31. Wherever both bars point the same way (both amber or both blue), the product bar in the middle shoots upward in warm amber (+). Wherever they disagree, it drops in cool blue (-).',
+        'Add all 32 product bars together and divide by √32 (about 5.66) to keep the scale gentle. That entire calculation produces ONE single real number: the match score between these two words. Try clicking different Key tokens on the controls below to watch the real 32-bar match change instantly.',
       ],
       practitioner: [
-        'The unscaled compatibility score is S_{i,j} = ∑_{c=0}^{15} q_{i,c} k_{j,c}. Across a sequence of length T, this is computed as a batched matrix multiplication Q K^T ∈ ℝ^{T × T}.',
-        'Click on different key tokens in the bottom bar ("Max", "dog", "ball", "."). Notice how Head 3 produces a strong positive dot product for animate masculine antecedents ("Max", "dog") and heavily suppresses punctuation or future positions.',
-        'The breakdown panel displays the exact arithmetic: raw dot product, scale divisor √16 = 4, and the resulting scaled score.',
+        'Inside each head (d_head = 32), the normalized input [T, 128] is projected by learned matrices W_q and W_k into Q_h [T, 32] and K_h [T, 32].',
+        'The compatibility between query position i and key position j is simply the scaled dot product: dot(Q[h, i], K[h, j]) / sqrt(32). Separating W_q and W_k makes matching asymmetric—so "He" can search for nouns while "Max" advertises itself as a subject without having to match itself equally in reverse.',
+        'Why divide by sqrt(32)? Summing 32 random products increases the variance by 32×. Without 1/sqrt(d_head), raw scores grow huge, forcing Softmax into saturated 0/1 cliffs where training gradients die.',
       ],
       formal: [
-        'Let q_i, k_j ∈ ℝ^{d_{head}}. The inner product ⟨q_i, k_j⟩ = q_i^T k_j represents the directional cosine similarity scaled by vector magnitudes ||q_i||_2 ||k_j||_2.',
-        'In our architecture, d_{head} = 16. Under independent identically distributed components with zero mean and unit variance, 𝔼[q_i^T k_j] = 0 and Var(q_i^T k_j) = d_{head} = 16.',
-        'Without rescaling, the variance of the logits scales linearly with dimension, pushing values to extreme magnitudes where softmax saturates.',
+        'For head h ∈ {0..3}, let q_i = (LN_1(h_i) W_{Q,h}^T) ∈ R^{32} and k_j = (LN_1(h_j) W_{K,h}^T) ∈ R^{32}. The raw pre-softmax attention logit is the bilinear form S_{h,i,j} = (q_i^T k_j) / √d_k = h_i^T (W_{Q,h}^T W_{K,h} / √32) h_j.',
+        'Under zero-mean, unit-variance independent coordinates, E[q_i^T k_j] = 0 and Var(q_i^T k_j) = d_k. Dividing by √d_k restores unit variance Var(S_{h,i,j}) = 1, keeping the downstream Softmax Jacobian well-conditioned.',
       ],
     },
     keyTakeaway: {
       foundations:
-        'Dot products add up matching coordinates. If coordinates agree in sign, the score shoots up; if they disagree, the score plummets.',
+        'A dot product is just 32 pair-by-pair alignment votes added together into one match score.',
       practitioner:
-        'High-dimensional dot products act as soft feature detectors, matching search queries against advertised keys.',
+        'S[i, j] = dot(Q[i], K[j]) / sqrt(32) measures asymmetric query-to-key alignment with unit-variance scaling.',
       formal:
-        'The variance of the unnormalized dot product scales directly with d_{head}, requiring normalization prior to exponentiation.',
+        'Scaled bilinear QK circuits compute S_{i,j} = q_i^T k_j / √d_k to prevent Softmax Jacobian saturation.',
     },
     predict: {
-      id: 'predict-c4-b2',
+      id: 'ch4-b2-predict',
       question:
-        'If two 16-dimensional vectors have opposite signs on 14 out of 16 coordinates, what will the dot product most likely be?',
+        'What happens in one dimension d when BOTH q_i[d] and k_j[d] are negative numbers (for example, -0.8 and -0.5)?',
       options: [
         {
-          id: 'opt-a',
-          label: 'Negative, because negative products dominate the sum.',
+          id: 'a',
+          label: 'They multiply to a positive vote (+0.40), increasing the match score because both vectors agreed on that feature.',
         },
         {
-          id: 'opt-b',
-          label: 'Zero, because opposite signs cancel out.',
+          id: 'b',
+          label: 'They multiply to a negative penalty (-0.40), lowering the match score.',
         },
         {
-          id: 'opt-c',
-          label: 'Positive, because squaring occurs in vector multiplication.',
+          id: 'c',
+          label: 'Negative values are ignored before the dot product.',
         },
       ],
-      correctId: 'opt-a',
+      correctId: 'a',
       explanation:
-        'The dot product is a linear sum of products. Each coordinate pair with opposite signs contributes a negative number (+ × - = -), driving the overall score strongly negative.',
+        'Correct! Negative × negative = positive. A dot product rewards alignment in either direction, not just positive numbers.',
     },
   },
   {
-    id: 'c4-b3-scan-row',
+    id: 'attn-beat-3',
     beatNumber: 3,
-    shortTitle: '3. Row Scan & 1/√d',
-    heading: 'Scanning the Entire Past & The 1/√d Scale Factor',
+    shortTitle: '3. Scanning One Row',
+    heading: 'One Word Scans Every Earlier Word',
     sceneBeat: 'attn-3-scan-row',
     visualFocusNote:
-      'Scene expands from a single pair to the entire horizontal row of dot products that Query "He" casts across all tokens.',
+      'Now the Query token runs that exact dot product against every token in the sentence, producing a single 1D row of raw signed scores.',
     paragraphs: {
       foundations: [
-        'Query "He" does not look at only one token—it scans every single word that came before it simultaneously, producing a full row of scores.',
-        'Notice the scale factor 1/√16 = 1/4 = 0.25. Why must we divide every score by 4? Because adding 16 multiplications causes numbers to grow 4 times wider in variance. If numbers get too large (+12 or -15), softmax becomes an all-or-nothing switch that ignores all nuance.',
-        'Dividing by √d keeps scores in a gentle range where multiple tokens can share attention weights proportionately.',
+        'Now that you know how one pair produces one score, repeat that exact test across the whole sentence. Our chosen Query word slides its Query strip past every word’s Key strip—producing one raw signed bar above each word.',
+        'Tall amber bars mean strong agreement; downward blue bars mean "not what I am looking for." Notice we still do NOT have a scary 2D table—just one single line of match scores for one word.',
+        'Look closely at the raw numbers: some are negative, some are positive, and they don’t add up to 100% yet. We cannot use raw negative numbers to mix word meanings cleanly—so we need two more steps next.',
       ],
       practitioner: [
-        'In PyTorch: `scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)`. In our verified miniature transformer, d_k = 16, so the divisor is exactly 4.0.',
-        'Toggle the "Raw Scores" HUD button. Without 1/√d, scores swing between -8 and +14. After dividing by 4, they stay neatly between -2.0 and +3.5, keeping softmax gradients healthy during training.',
-        'The 3D stage renders the complete horizontal row of scores cast by the active Query token across all sequence positions.',
+        'Fixing a single query row i and dotting q_i against all key vectors K_h[0..T-1] produces one 1D vector of length T: S_h[i, :] = (q_i @ K_h^T) / sqrt(32).',
+        'These raw logits are unbounded real numbers (typically ranging from -4 to +4 in our trained miniature model). Try clicking different tokens in the bottom bar to inspect each token’s live raw score profile across the sentence.',
       ],
       formal: [
-        'Let z_j = (q_i^T k_j) / √{d_{head}}. For i.i.d. components q_{i,c}, k_{j,c} ∼ 𝒩(0, 1), the scaled logit satisfies Var(z_j) = 1.',
-        'Preserving unit variance prevents exponential divergence in the softmax denominator ∑_k exp(z_k), guaranteeing non-vanishing gradients: ∂(softmax)/∂z_j = s_j (δ_{jk} - s_k).',
-        'When Var(z) ≫ 1, the maximum logit dominates, forcing s_{max} → 1 and all other probabilities to 0, which collapses the gradient tensor to 0.',
+        'Row i of the pre-softmax score tensor is s_i = K_h q_i / √32 ∈ R^T. Notice that at this stage s_i contains entries for j > i as well—which would violate autoregressive causality if left unmasked during parallel training.',
       ],
     },
     keyTakeaway: {
       foundations:
-        'Dividing by √16 = 4 prevents extreme numbers from blowing up the softmax exponentiation.',
+        'One word testing every word in the sentence creates a single 1D row of raw positive and negative scores.',
       practitioner:
-        '1/√d_k standardizes logit variance to 1.0, protecting backpropagation from vanishing gradients.',
+        'One row of S = QKᵀ/√32 holds T unbounded real compatibility scores before masking and normalization.',
       formal:
-        'Rescaling stabilizes the spectral radius of the attention Jacobian matrix around unit magnitude.',
-    },
-    predict: {
-      id: 'predict-c4-b3',
-      question:
-        'If a frontier LLM uses attention heads of dimension d_head = 128, what is its exact scale factor?',
-      options: [
-        {
-          id: 'opt-a',
-          label: '1 / √128 ≈ 0.0884',
-        },
-        {
-          id: 'opt-b',
-          label: '1 / 128 = 0.0078',
-        },
-        {
-          id: 'opt-c',
-          label: '1 / √64 = 0.125',
-        },
-      ],
-      correctId: 'opt-a',
-      explanation:
-        'The formula is always 1 / √{d_{head}}. For d_head = 128, √128 ≈ 11.3137, giving a scale factor of approximately 0.0884.',
+        'Unmasked row scores s_i ∈ R^T must be causally restricted and mapped onto the probability simplex Δ^{T-1}.',
     },
   },
   {
-    id: 'c4-b4-mask-softmax',
+    id: 'attn-beat-4',
     beatNumber: 4,
-    shortTitle: '4. Mask & Softmax',
-    heading: 'The Causal Mask & Softmax Normalization (100% Budget)',
+    shortTitle: '4. Causal Mask & Softmax',
+    heading: 'Blocking the Future & Turning Scores Into a 100% Budget',
     sceneBeat: 'attn-4-mask-softmax',
     visualFocusNote:
-      'Scene visualizes the full N×N attention matrix with the upper triangular future masked to -∞ (slate tiles) and lower rows normalized to 100%.',
+      'Watch the matte Causal Mask shutter seal off any future tokens to the right of your chosen word, then toggle Raw Scores vs. Softmax Weights.',
     paragraphs: {
       foundations: [
-        'Time in language only moves forward. When computing representations for token 3 ("a little dog"), the model is not allowed to peek at token 10 ("red ball").',
-        'To enforce this physical law, the upper-right half of the attention matrix is covered by a causal mask: any connection to a future token is forced to -∞. Because exp(-∞) = 0, future positions receive strictly 0% attention.',
-        'Softmax then exponentiates the remaining past scores and divides each by their sum. Every row becomes an exact probability distribution that sums to 1.00 (100%).',
+        'First, look at any tokens to the right of our chosen word. Because the model’s job is to guess what comes NEXT, a word is never allowed to peek at the future. The matte gray barrier seals off every future slot by setting its score to negative infinity (-∞).',
+        'Second, we pass the surviving scores through Softmax. Softmax turns any messy list of positive and negative scores into clean percentages between 0% and 100% that ALWAYS add up to exactly 100%.',
+        'Because Softmax uses exponents, big positive scores grab most of the spotlight while negative scores shrink near zero—and masked future words become an exact 0%. Try clicking an earlier word in the middle of the sentence to see the future shutter slide right up beside it.',
       ],
       practitioner: [
-        'The causal mask is a lower-triangular matrix: M_{i,j} = 0 for j ≤ i, and -10000.0 (or -inf) for j > i. In our verified FP16 engine, -10000.0 is used to avoid NaN underflow.',
-        'In the 3D grid below, dark slate tiles represent masked future tokens. Notice how each token i can only look at positions 0 through i.',
-        'The glowing blue cells show the normalized attention weights A_{i,j}. Notice how row 14 ("He") distributes its 100% budget predominantly across "Max" and "dog".',
+        'During training, all T tokens run in one parallel matrix multiply. Without the Causal Mask setting S[i, j] = -1e9 for all j > i, token 5 could trivially cheat by reading token 6. After exp(-1e9) = 0, future positions receive strictly zero attention weight.',
+        'Row-wise Softmax creates competition: raising one key’s raw score automatically pulls probability mass away from every other key so sum_j A[i, j] = 1.000000. Use the Raw vs. Softmax toggle on stage to compare before and after on the exact same row.',
       ],
       formal: [
-        'Let M ∈ ℝ^{T × T} with M_{i,j} = 0 if j ≤ i and M_{i,j} = -∞ if j > i. The attention matrix A is defined as A = \\text{softmax}\\left( \\frac{Q K^T}{\\sqrt{d_{head}}} + M \\right).',
-        'By construction, A_{i,j} = 0 for all j > i, preserving the autoregressive factorization P(x) = ∏_{t=1}^T P(x_t | x_{<t}).',
-        'Row stochasticity is strictly preserved: A 1_T = 1_T and A_{i,j} ≥ 0, meaning A acts as a Markov transition kernel over the sequence graph.',
+        'Causal masking enforces M_{i,j} = S_{i,j} for j ≤ i and M_{i,j} = -∞ (implemented as -1e9 in src/engine/transformer.ts) for j > i. Row-wise Softmax A_{i,j} = exp(M_{i,j} - m_i) / Σ_r exp(M_{i,r} - m_i) yields a lower-triangular row-stochastic matrix ensuring P(x_{1..T}) = ∏_t P(x_t | x_{<t}).',
       ],
     },
     keyTakeaway: {
       foundations:
-        'The causal mask blocks the future with -∞ so the AI cannot cheat. Softmax turns raw scores into exact percentages summing to 100%.',
+        'The Causal Mask blindfolds future words, and Softmax turns the remaining scores into percentages summing to 100%.',
       practitioner:
-        'Causal masking converts attention into a lower-triangular row-stochastic matrix where each token distributes a unit probability budget.',
+        'Masking j > i to -∞ before row-wise Softmax enforces left-to-right causality and turns scores into a convex weight distribution.',
       formal:
-        'A ∈ ℝ^{T × T} belongs to the directed acyclic graph convolution manifold, enforcing non-anticipative causality in the model.',
+        'Lower-triangular row-stochastic A_h guarantees autoregressive factorizability across parallel teacher-forced passes.',
     },
     predict: {
-      id: 'predict-c4-b4',
+      id: 'ch4-b4-predict',
       question:
-        'What would happen during autoregressive text generation if the causal mask were omitted during training?',
+        'Why do we overwrite future tokens with -∞ BEFORE Softmax instead of simply replacing them with 0 before Softmax?',
       options: [
         {
-          id: 'opt-a',
-          label: 'The model would learn to look ahead to cheat during training, and collapse at test time.',
+          id: 'a',
+          label: 'Because exp(0) = 1, so setting raw scores to 0 would STILL give future tokens positive attention weight! Only exp(-∞) becomes 0.',
         },
         {
-          id: 'opt-b',
-          label: 'Generation speed would double due to bidirectional parallelism.',
+          id: 'b',
+          label: 'Because computers cannot multiply by zero.',
         },
         {
-          id: 'opt-c',
-          label: 'Nothing; position embeddings already prevent looking into the future.',
+          id: 'c',
+          label: 'There is no difference; 0 and -∞ give the exact same Softmax output.',
         },
       ],
-      correctId: 'opt-a',
+      correctId: 'a',
       explanation:
-        'Without a causal mask, token t can simply attend to token t+1 to copy the answer. At inference time, token t+1 does not exist yet, so the model hallucinates or outputs gibberish.',
+        'Spot on! Since e⁰ = 1, a raw score of 0 actually gets real weight in Softmax. You must push masked scores to -∞ so e^(-∞) = 0.',
     },
   },
   {
-    id: 'c4-b5-value-mixer',
+    id: 'attn-beat-5',
     beatNumber: 5,
-    shortTitle: '5. Value Mixing',
-    heading: 'Value Mixing: Constructing the New Context Vector',
+    shortTitle: '5. Mixing Values (A · V)',
+    heading: 'Copying Meaning: The Value Mixing Bowl',
     sceneBeat: 'attn-5-value-mixer',
     visualFocusNote:
-      'Scene shows the attention weights pulling proportional slices of past Value vectors into a single new 16-dimensional representation.',
+      'Watch the top attended tokens’ 32-number Value strips pour into the blended output vector A·V in exact proportion to their Softmax weights.',
     paragraphs: {
       foundations: [
-        'Now comes the payoff. Query and Key were just the matchmaking system—they determined the percentages. Value is the actual cargo being delivered.',
-        'If "He" assigned 62% attention to "Max", 25% to "dog", and 13% to "ball", the model computes a weighted average: 0.62 × V("Max") + 0.25 × V("dog") + 0.13 × V("ball").',
-        'The result is a brand-new 16-dimensional vector for "He". Before attention, "He" was just a generic pronoun. After attention, its vector is enriched with the actual traits of Max the dog.',
+        'Here is the step almost every tutorial forgets to explain clearly: Attention does NOT stop at highlighting which earlier words matter. Highlighting alone wouldn’t change what "He" means!',
+        'Every word also created a third 32-number list called its Value (V)—the actual packet of meaning it wants to share if someone pays attention to it. Now, our chosen word builds a blended message by pouring together every earlier word’s Value strip multiplied by its Softmax percentage.',
+        'Look at the 3D mixing stage: if "He" puts 40% weight on "Max" and 20% weight on "ball", its new 32-number output literally becomes 40% of Max’s Value plus 20% of ball’s Value (plus smaller splashes of the rest). When that blend gets added back onto "He" in the Residual Stream, the vector for "He" now physically carries Max and the ball inside it.',
       ],
       practitioner: [
-        'Context representation for head h: HeadOut_h = A_h V_h ∈ ℝ^{T × 16}. For token i, the output is out_{i,h} = ∑_{j=0}^i A_{i,j,h} v_{j,h}.',
-        'Because ∑_j A_{i,j} = 1, the output vector lies strictly inside the convex hull of the input Value vectors.',
-        'Observe the glowing streams in the 3D scene converging from past tokens into the output node for "He".',
+        'Once A_h[i, :] is computed, the head forms a weighted linear combination of the Value matrix V_h [T, 32]: Z_h[i] = Σ_{j=0}^i A_h[i, j] · V_h[j].',
+        'Notice the clean functional split: the QK circuit decides WHERE to read from, while V (paired with W_o) is the OV circuit deciding WHAT information gets copied into the destination token’s residual stream.',
+        'When you disable a head in Ablation Mode, our engine zeroes out this exact Z_h tensor right before concatenation.',
       ],
       formal: [
-        'The head context mapping is a non-local linear aggregation operator: y_{i,h} = ∑_{j=1}^i A_{i,j,h} v_{j,h} = [A_h V_h]_i.',
-        'Because A_{i,:} ∈ Δ^{T-1} (the probability simplex), y_{i,h} is a convex combination of {v_{1,h}, ..., v_{i,h}}.',
-        'This proves that self-attention is a contractive operator on the value manifold under the convex hull metric: ||y_i||_2 ≤ \\max_j ||v_j||_2.',
+        'For head h, Z_h = A_h V_h ∈ R^{T × 32} computes a convex combination of Value vectors v_j = LN_1(h_j) W_{V,h}^T for j ≤ i. Combined with the head slice of W_O, the linear map W_{OV,h} = W_{O,h} W_{V,h} controls how source features write into the residual stream subspace.',
       ],
     },
     keyTakeaway: {
       foundations:
-        'Attention percentages are a recipe: the model takes a weighted smoothie of past Value vectors to enrich the current token.',
+        'Attention isn’t just highlighting words—it physically blends earlier words’ Value vectors into the current word.',
       practitioner:
-        'The attention output is a batched GEMM: HeadOut = A · V. It routes factual features across arbitrary distances in a single hop.',
+        'Z_h = A_h V_h copies weighted Value payloads across token positions; QK decides where, OV decides what.',
       formal:
-        'Self-attention computes a data-dependent convex combination on the value manifold, bounding output norms within the convex hull.',
-    },
-    predict: {
-      id: 'predict-c4-b5',
-      question:
-        'If a token assigns 100% of its attention weight to a single past word, what is its resulting head output vector?',
-      options: [
-        {
-          id: 'opt-a',
-          label: 'An exact copy of that past word’s Value vector.',
-        },
-        {
-          id: 'opt-b',
-          label: 'An average of the past word and the current word.',
-        },
-        {
-          id: 'opt-c',
-          label: 'Zero, because attention requires multiple words to blend.',
-        },
-      ],
-      correctId: 'opt-a',
-      explanation:
-        'Because the output is ∑_j A_{i,j} v_j, if A_{i,k} = 1.0 and all other weights are 0, the sum reduces to 1.0 × v_k = v_k exactly.',
+        'The output of head h is the convex mixture Z_{h,i} = Σ_{j≤i} A_{h,i,j} (x_j W_{V,h}^T) projected via W_{O,h}.',
     },
   },
   {
-    id: 'c4-b6-multihead-full',
+    id: 'attn-beat-6',
     beatNumber: 6,
-    shortTitle: '6. 4-Head Orchestra',
-    heading: 'The 4-Head Orchestra & Output Projection (W_o)',
+    shortTitle: '6. Full Matrix & 4 Heads',
+    heading: 'Stacking Every Row & Running 4 Heads in Parallel',
     sceneBeat: 'attn-6-multihead-full',
     visualFocusNote:
-      'Scene pulls back to show all 4 attention heads operating in parallel, concatenating into 64 dimensions, and mixing via W_o with surgical ablation.',
+      'Only now do all T rows stack into the classic lower-triangular [T, T] attention matrix—alongside all 4 parallel heads feeding into W_o.',
     paragraphs: {
       foundations: [
-        'A sentence has many things happening at once: grammar, meaning, gender, and rhythm. A single attention head cannot focus on all of them simultaneously.',
-        'That is why our model uses 4 separate heads running in parallel. Head 0 tracks gender and subjects ("He" → "Max"); Head 1 tracks recent punctuation; Head 2 tracks verbs; Head 3 tracks narrative themes.',
-        'All 4 heads (4 × 16 = 64 numbers) are concatenated side-by-side, multiplied by the Output Matrix W_o, and added back into the residual stream via the skip connection.',
+        'Now step back! Everything you just watched for ONE word happens simultaneously for EVERY word in the sentence. Stack all those 1D rows one behind another, and suddenly that famous staircase-shaped Attention Matrix makes complete sense—each row is one word looking back, and the flat gray half is the Causal Mask blocking the future.',
+        'Even better: why stop at one spotlight? A word often needs to track multiple clues at once—one spotlight for the previous word, one for punctuation, one for the character’s name. So every block runs FOUR independent Attention Heads side-by-side (H0, H1, H2, H3).',
+        'Switch between Head 0, 1, 2, and 3 below to see how each head looks at totally different words, or click "Disable Head" to unplug one head live and watch how the model’s prediction shifts. Finally, all four 32-number head outputs snap back together into 128 numbers and pass through W_o onto the Residual Highway.',
       ],
       practitioner: [
-        'MultiHead output: Concat(Head_0, Head_1, Head_2, Head_3) ∈ ℝ^{T × 64}. Multiplying by W_o ∈ ℝ^{64 × 64} projects the concatenated features back into residual coordinates.',
-        'Residual addition: x_{next} = x + MultiHead(x) W_o. The residual connection ensures identity gradient flow across deep transformer stacks.',
-        'Click the "Ablate Head" button in the HUD. Notice how surgically disabling Head 3 shifts the next-token prediction immediately, proving that specific heads specialize in distinct roles.',
+        'Stacking all T query rows gives the full tensor A_h [T, T], executed across all 4 heads in parallel as [4, T, T]. Concatenating Z_0..Z_3 restores [T, 128], which multiplies W_o [128, 128] to write back into the residual stream.',
+        'Notice redundancy: try disabling different heads below—some heads are critical for the next-token prediction while others barely move the loss. In frontier LLMs (Llama, Gemini, Mistral), Grouped-Query Attention (GQA) shares K and V heads across multiple Q heads to cut KV-cache memory by 4–8× with minimal quality loss.',
       ],
       formal: [
-        'The complete multi-head attention map is defined as \\text{MHA}(x) = [\\text{head}_0 \\Vert \\text{head}_1 \\Vert \\text{head}_2 \\Vert \\text{head}_3] W_o where \\text{head}_h = A_h (x W_{v,h}).',
-        'While each head possesses rank at most d_{head} = 16, their concatenation spans a full rank-64 subspace: rank(MHA(x)) ≤ \\min(64, 4 × 16) = 64.',
-        'W_o ∈ ℝ^{64 × 64} provides full cross-head linear mixing before adding the result back to the residual stream x^{(l)} = x^{(l-1)} + \\text{MHA}(\\text{LN}(x^{(l-1)})).',
+        'MHA(X) = Concat(Z_0, ..., Z_{H-1}) W_O^T = Σ_{h=0}^{H-1} A_h X W_{V,h}^T W_{O,h}^T, where W_O ∈ R^{128×128} is partitioned column-wise into H=4 head output projections of shape [128, 32]. Because the sum is additive across heads, each head acts as an independent low-rank residual stream writer.',
       ],
     },
     keyTakeaway: {
       foundations:
-        'Multiple heads divide and conquer: each head becomes a specialist, and W_o fuses their findings back into the main residual stream.',
+        'The full matrix is just every word’s row stacked together—and 4 parallel heads let the model track 4 clues at once.',
       practitioner:
-        'Multi-head attention combines multiple low-rank projections into a full-rank update, fused by W_o and stabilized by residual addition.',
+        'Four [T, 32] heads run in parallel, concatenate to [T, 128], and project through W_o back onto the residual stream.',
       formal:
-        'Multi-head attention constructs an ensemble of rank-16 relational operators whose direct sum spans the full 64-dimensional residual space.',
-    },
-    predict: {
-      id: 'predict-c4-b6',
-      question:
-        'Why not replace the 4 heads of size 16 with a single giant head of size 64?',
-      options: [
-        {
-          id: 'opt-a',
-          label: 'A single head can only produce ONE attention pattern per token, preventing simultaneous multi-role tracking.',
-        },
-        {
-          id: 'opt-b',
-          label: 'A 64-dimensional head requires 4× more FLOPs to compute.',
-        },
-        {
-          id: 'opt-c',
-          label: 'Softmax cannot normalize vectors with dimension greater than 32.',
-        },
-      ],
-      correctId: 'opt-a',
-      explanation:
-        'A single head only produces one set of weights per token. Token "He" would have to choose between attending to its gender antecedent ("Max") OR its syntactic context, unable to do both at once.',
+        'Multi-Head Attention decomposes into an additive sum of H independent rank-32 QK/OV circuits writing to R^{d_model}.',
     },
   },
 ];
@@ -408,85 +329,80 @@ export const CHAPTER_4_BEATS: BookBeat[] = [
 export const TEXTBOOK_CHAPTERS: ChapterMeta[] = [
   {
     id: 1,
-    title: 'From Characters to Thought Vectors',
-    subtitle: 'Byte-Pair Encoding, Token Embeddings, and the Geometry of Words',
+    title: 'Breaking Language Into Atoms',
+    subtitle: 'Tokenization, BPE Merges, Vocabulary IDs & Context Window',
     status: 'upcoming',
     openingMystery:
-      'How does a computer that only adds and multiplies numbers know that "dog" and "puppy" are practically siblings, while "dog" and "fog" are total strangers?',
+      'Why can’t computers read raw letters—and why do LLMs miscount the R’s in "strawberry"?',
     beats: [],
   },
   {
     id: 2,
-    title: 'The Residual Stream Highway',
-    subtitle: 'Layer Stacking, Residual Streams, and Additive Memory Accumulation',
+    title: 'The Geometry of Meaning',
+    subtitle: 'Embeddings (wte), 3D PCA Space, Positional Encoding & RoPE',
     status: 'upcoming',
     openingMystery:
-      'How do 4 deep transformer layers keep refining an idea across time without earlier memories getting overwritten or erased?',
+      'How do meaningless integer IDs become directions in 128-dimensional space—and how does the model know word order?',
     beats: [],
   },
   {
     id: 3,
-    title: 'Keeping Numbers Sane: LayerNorm',
-    subtitle: 'RMSNorm, Variance Explosion, and Normalized Activation Spheres',
+    title: 'The Unbroken Highway',
+    subtitle: 'The Residual Stream, Additive Updates, Pre-LayerNorm & RMSNorm',
     status: 'upcoming',
     openingMystery:
-      'Why do neural networks go completely berserk and output NaNs if you do not force every vector onto a standardized sphere before every layer?',
+      'How does a deep stack of layers keep adding new ideas without erasing earlier memory or letting numbers explode?',
     beats: [],
   },
   {
     id: 4,
-    title: 'How Words Talk: Self-Attention',
-    subtitle: 'Q, K, V Projections, Scaled Dot Products, Causal Masking, and the 4-Head Orchestra',
+    title: 'How Words Talk — Self-Attention',
+    subtitle: 'Q/K/V, Scaled Dot Products, Causal Mask, Softmax, Value Mixing & 4 Heads',
     status: 'ready',
     openingMystery:
-      'How does the tiny word "He" at the end of a sentence reach back across 14 tokens to figure out it is referring to Max the dog?',
+      'How does the word "He" figure out it refers to a little dog named Max who found a red ball?',
     beats: CHAPTER_4_BEATS,
   },
   {
     id: 5,
-    title: 'Private Thinking: The MLP Engine',
-    subtitle: '4× Dimension Expansion, GELU Activation, and Fact Retrieval Storage',
+    title: 'Private Thinking & Memory',
+    subtitle: 'Feed-Forward Network (MLP), 4× Expansion, GELU, SwiGLU & MoE',
     status: 'upcoming',
     openingMystery:
-      'Attention only routes information between tokens. Where does the model actually store its facts and think quietly to itself?',
+      'If Attention only averages existing vectors, where does the model think privately and store learned facts?',
     beats: [],
   },
   {
     id: 6,
-    title: 'Turning Math Back Into English',
-    subtitle: 'Unembedding, Logit Lens, Softmax Temperature, and Autoregressive Sampling',
+    title: 'Sharpening a Guess & Writing a Story',
+    subtitle: 'Logit Lens, Unembedding, Temperature/Top-k/Top-p, Autoregression & KV Cache',
     status: 'upcoming',
     openingMystery:
-      'If the final vector is just 64 numbers, how does the model turn it into an exact probability distribution over all 2,048 English vocabulary tokens?',
+      'If the math is 100% deterministic, why does the exact same prompt give different answers?',
     beats: [],
   },
   {
     id: 7,
-    title: 'Where the Weights Came From',
-    subtitle: 'Cross-Entropy Loss, Backpropagation, and the AdamW Optimization Journey',
+    title: 'Where Every Number Came From',
+    subtitle: 'Cross-Entropy Loss, Manual Backprop, AdamW, Training Replay & Hallucination',
     status: 'upcoming',
     openingMystery:
-      'Nobody programmed grammar or story plots into this file. How did 862,464 completely random numbers teach themselves English?',
+      'Nobody programmed grammar into this AI—how did 862,464 random numbers organize themselves into English?',
     beats: [],
   },
   {
     id: 8,
     title: 'From Miniature Toy to Frontier AI',
-    subtitle: 'Scaling Laws, Architectural Evolution, and the Leap from 862K to 1 Trillion Parameters',
+    subtitle: 'Surgical Ablation, Scaling Laws, Modern Upgrades & Post-Training (SFT / RLHF)',
     status: 'upcoming',
     openingMystery:
-      'What stays identical, and what changes when you scale an 862,464-parameter toy up to a 1,000,000× larger frontier model?',
+      'What stays identical and what fundamentally changes across a 1,000,000× jump to trillion-parameter LLMs?',
     beats: [],
   },
 ];
 
-export function editionLabel(edition: Edition): string {
-  switch (edition) {
-    case 'foundations':
-      return 'Foundations (Intuition)';
-    case 'practitioner':
-      return 'Practitioner (Code & Tensors)';
-    case 'formal':
-      return 'Formal (Mathematical Proof)';
-  }
+export function editionLabel(e: Edition): string {
+  if (e === 'foundations') return 'Foundations';
+  if (e === 'practitioner') return 'Practitioner';
+  return 'Formal';
 }
