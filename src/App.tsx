@@ -1,21 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BookReader } from './components/BookReader';
 import {
-  getChapterMeta,
   PRESET_PROMPTS,
   TEXTBOOK_CHAPTERS,
-  type BookBeat,
+  type SceneBeatId,
 } from './content/bookData';
-import { createEngineClient, type EngineClient } from './engine/client';
+import { TransformerEngineClient } from './engine/client';
 import type {
+  ActiveLayerTrace,
   EngineInitResult,
   EngineTraceResult,
-  TokenizerData,
 } from './engine/types';
-import { StageSnapshot, TextbookStage } from './scene/TextbookStage';
+import { TextbookStage } from './scene/TextbookStage';
 import {
-  BookState,
-  DEFAULT_PROMPT,
+  clampInt,
   hasActiveAblation,
   hasResidualAblation,
   isFinalLnDisabled,
@@ -25,6 +23,7 @@ import {
   toggleAllResiduals,
   toggleFinalLn,
   toggleHeadDisabled,
+  type BookState,
 } from './state/bookState';
 import {
   computeDotProductBreakdown,
@@ -40,160 +39,184 @@ import {
   traceBpeMerges,
 } from './utils/pass2Math';
 
-export default function App() {
+export function App() {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<TextbookStage | null>(null);
+  const clientRef = useRef<TransformerEngineClient | null>(null);
+
   const [state, setState] = useState<BookState>(() =>
     stateFromUrl(window.location.search)
   );
-  const [client, setClient] = useState<EngineClient | null>(null);
+  const [draftPrompt, setDraftPrompt] = useState<string>(state.prompt);
+  const [showContents, setShowContents] = useState<boolean>(false);
   const [initInfo, setInitInfo] = useState<EngineInitResult | null>(null);
-  const [baselineTrace, setBaselineTrace] = useState<EngineTraceResult | null>(
-    null
-  );
-  const [activeTrace, setActiveTrace] = useState<EngineTraceResult | null>(null);
   const [wteWeights, setWteWeights] = useState<Float32Array | null>(null);
-  const [bpeStepIdx, setBpeStepIdx] = useState<number>(999);
-  const [ropeSlotA, setRopeSlotA] = useState<number>(3);
-  const [ropeSlotB, setRopeSlotB] = useState<number>(11);
-  const [showContents, setShowContents] = useState(false);
-  const [inputVal, setInputVal] = useState(state.prompt);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
+  const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
+  const [bpeStepIdx, setBpeStepIdx] = useState<number>(0);
+  const [ropeSlotA, setRopeSlotA] = useState<number>(2);
+  const [ropeSlotB, setRopeSlotB] = useState<number>(5);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const stageMountRef = useRef<HTMLDivElement | null>(null);
-  const stageRef = useRef<TextbookStage | null>(null);
+  const chapter =
+    TEXTBOOK_CHAPTERS.find((c) => c.id === state.chapterId) ??
+    TEXTBOOK_CHAPTERS[0];
+  const maxBeatIdx = Math.max(0, chapter.beats.length - 1);
+  const clampedBeatIdx = clampInt(state.beatIndex, 0, maxBeatIdx);
+  const activeBeat = chapter.beats[clampedBeatIdx] ?? null;
+  const activeSceneBeat: SceneBeatId = activeBeat?.sceneBeat ?? 'ch1-1-extremes';
 
-  // Sync state to URL bar without reloading
+  // Sync deep-link URL state
   useEffect(() => {
-    const search = stateToSearch(state);
-    const nextUrl = `${window.location.pathname}${search}`;
-    window.history.replaceState(null, '', nextUrl);
+    const nextSearch = stateToSearch(state);
+    if (window.location.search !== nextSearch) {
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${nextSearch}`
+      );
+    }
   }, [state]);
 
-  // Init Engine Client Worker
+  // Mount Three.js Stage once
   useEffect(() => {
-    let unmounted = false;
-    const c = createEngineClient();
-    setClient(c);
+    const el = mountRef.current;
+    if (!el) return;
 
-    c.init()
-      .then(async (info) => {
-        if (unmounted) return;
-        setInitInfo(info);
-        try {
-          const wte = await c.getTensor('wte.weight');
-          if (!unmounted && wte) {
-            setWteWeights(wte);
+    const stage = new TextbookStage(el, {
+      onPickToken: (idx) => {
+        setState((prev) => {
+          if (prev.chapterId === 4 && prev.beatIndex === 1) {
+            return { ...prev, keyIdx: idx };
           }
-        } catch (e) {
-          console.warn('Could not load wte.weight tensor:', e);
-        }
-      })
-      .catch((err) => {
-        if (!unmounted) {
-          setErrorMsg(err instanceof Error ? err.message : String(err));
-        }
-      });
-
-    return () => {
-      unmounted = true;
-      c.destroy();
-    };
-  }, []);
-
-  // Mount 3D Three.js stage
-  useEffect(() => {
-    if (!stageMountRef.current) return;
-    const stage = new TextbookStage(stageMountRef.current);
+          return { ...prev, queryIdx: idx };
+        });
+      },
+      onPickHead: (head) => {
+        setState((prev) => ({ ...prev, head }));
+      },
+    });
     stageRef.current = stage;
 
-    const onResize = () => stage.resize();
-    window.addEventListener('resize', onResize);
-
     return () => {
-      window.removeEventListener('resize', onResize);
-      stage.destroy();
+      stage.dispose();
       stageRef.current = null;
     };
   }, []);
 
-  // Run forward pass whenever prompt or ablation changes
+  // Boot verified TypeScript engine and load real weights + wte for PCA
   useEffect(() => {
-    if (!client || !initInfo) return;
-    let cancelled = false;
+    const client = new TransformerEngineClient();
+    clientRef.current = client;
+    const modelBaseUrl = new URL(
+      `${import.meta.env.BASE_URL}model/`,
+      window.location.origin
+    ).href;
 
-    // Baseline run (unablated)
     client
-      .trace(state.prompt, {})
-      .then((bRes) => {
-        if (cancelled) return;
-        setBaselineTrace(bRes);
-
-        // Active run (with current user ablation)
-        if (hasActiveAblation(state.ablation)) {
-          return client.trace(state.prompt, state.ablation);
-        }
-        return bRes;
+      .init(modelBaseUrl)
+      .then((info) => {
+        setInitInfo(info);
+        return client.getTensor('wte.weight');
       })
-      .then((aRes) => {
-        if (!cancelled && aRes) {
-          setActiveTrace(aRes);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setErrorMsg(err instanceof Error ? err.message : String(err));
-        }
-      });
+      .then((wte) => setWteWeights(wte))
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : String(err))
+      );
 
     return () => {
-      cancelled = true;
+      client.dispose();
+      clientRef.current = null;
     };
-  }, [client, initInfo, state.prompt, state.ablation]);
+  }, []);
 
-  // Precompute 3D PCA cloud once wte tensor and tokenizer vocab are ready
+  // Re-run real forward pass & ablation counterfactual on prompt or ablation change
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client || !initInfo) return;
+    let alive = true;
+    setBusy(true);
+    setError(null);
+
+    const run = async () => {
+      try {
+        const baseRes = await client.trace(state.prompt);
+        if (!alive) return;
+        setBaseline(baseRes);
+
+        if (hasActiveAblation(state.ablation)) {
+          const ablRes = await client.trace(state.prompt, state.ablation);
+          if (!alive) return;
+          setAblated(ablRes);
+        } else {
+          setAblated(null);
+        }
+      } catch (err) {
+        if (alive) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        if (alive) setBusy(false);
+      }
+    };
+
+    void run();
+    return () => {
+      alive = false;
+    };
+  }, [initInfo, state.prompt, state.ablation]);
+
+  // Exact 3D PCA cloud computed once from our model's real wte.weight [512, 128]
   const pcaCloud = useMemo(() => {
-    if (!wteWeights || !initInfo?.tokenizer) return null;
-    return computeWtePca3D(wteWeights, initInfo.tokenizer.vocab, 128);
+    if (!wteWeights || !initInfo) return null;
+    return computeWtePca3D(
+      wteWeights,
+      initInfo.tokenizer.vocab,
+      initInfo.manifest.config.d_model
+    );
   }, [wteWeights, initInfo]);
 
-  // Compute live step-by-step BPE merges for current prompt
+  // Real step-by-step BPE merge history for Chapter 1 Beat 2
   const bpeSteps = useMemo(() => {
-    if (!initInfo?.tokenizer) return [];
+    if (!initInfo) return [];
     return traceBpeMerges(state.prompt, initInfo.tokenizer);
-  }, [state.prompt, initInfo]);
+  }, [initInfo, state.prompt]);
 
-  // Resolved chapter and beat
-  const chapter = getChapterMeta(state.chapterId);
-  const clampedBeatIdx = Math.max(
-    0,
-    Math.min(chapter.beats.length - 1, state.beatIndex)
-  );
-  const activeBeat: BookBeat | null = chapter.beats[clampedBeatIdx] ?? null;
-  const activeSceneBeat = activeBeat?.sceneBeat ?? 'ch1-1-extremes';
+  const safeBpeStep = clampInt(bpeStepIdx, 0, Math.max(0, bpeSteps.length - 1));
+  const activeTrace = ablated ?? baseline;
 
-  // Fallback defaults for Query and Key token indices
-  const resolvedQueryIdx = useMemo(() => {
-    const len = activeTrace?.tokens.length ?? 1;
-    if (state.queryIdx !== null && state.queryIdx < len) {
-      return state.queryIdx;
+  const { resolvedQueryIdx, resolvedKeyIdx } = useMemo(() => {
+    if (!activeTrace) return { resolvedQueryIdx: 0, resolvedKeyIdx: 0 };
+    const T = activeTrace.tokens.length;
+    const q = clampInt(state.queryIdx ?? T - 1, 0, T - 1);
+
+    if (state.keyIdx !== null) {
+      return {
+        resolvedQueryIdx: q,
+        resolvedKeyIdx: clampInt(state.keyIdx, 0, q),
+      };
     }
-    return Math.max(0, len - 1);
-  }, [state.queryIdx, activeTrace]);
 
-  const resolvedKeyIdx = useMemo(() => {
-    const len = activeTrace?.tokens.length ?? 1;
-    if (state.keyIdx !== null && state.keyIdx < len) {
-      return state.keyIdx;
+    const lt = activeTrace.trace.layers[state.layer];
+    let bestK = Math.max(0, q - 1);
+    if (!lt.skipped && q > 0) {
+      const row = lt.attn.attnWeights[state.head][q];
+      let bestW = -1;
+      for (let c = 0; c < q; c++) {
+        if (row[c] > bestW) {
+          bestW = row[c];
+          bestK = c;
+        }
+      }
     }
-    // Default to a token around ~6 steps before query if possible
-    return Math.max(0, resolvedQueryIdx - 6);
-  }, [state.keyIdx, resolvedQueryIdx, activeTrace]);
+    return { resolvedQueryIdx: q, resolvedKeyIdx: bestK };
+  }, [activeTrace, state.queryIdx, state.keyIdx, state.layer, state.head]);
 
-  // Push latest snapshot to 3D Stage
+  // Push live state & beat choreography to 3D stage
   useEffect(() => {
-    if (!stageRef.current || !activeTrace || !initInfo) return;
-    const baseline = baselineTrace ?? activeTrace;
-    const safeBpeStep = Math.min(bpeStepIdx, Math.max(0, bpeSteps.length - 1));
-
+    if (!stageRef.current || !activeTrace || !baseline || !initInfo) return;
     stageRef.current.update({
       beat: activeSceneBeat,
       layer: state.layer,
@@ -213,6 +236,9 @@ export default function App() {
       ropeSlotB,
     });
   }, [
+    activeTrace,
+    baseline,
+    initInfo,
     activeSceneBeat,
     state.layer,
     state.head,
@@ -220,323 +246,380 @@ export default function App() {
     resolvedKeyIdx,
     state.showPreSoftmax,
     state.ablation,
-    activeTrace,
-    baselineTrace,
-    initInfo,
     wteWeights,
     pcaCloud,
     bpeSteps,
-    bpeStepIdx,
+    safeBpeStep,
     ropeSlotA,
     ropeSlotB,
   ]);
 
-  // Generate real-time telemetry numbers for the BookReader live card
+  // Keyboard shortcuts: Left/Right step beats, 1/2/3 switch editions
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'ArrowRight') {
+        setState((prev) => ({
+          ...prev,
+          beatIndex: clampInt(prev.beatIndex + 1, 0, maxBeatIdx),
+        }));
+      } else if (e.key === 'ArrowLeft') {
+        setState((prev) => ({
+          ...prev,
+          beatIndex: clampInt(prev.beatIndex - 1, 0, maxBeatIdx),
+        }));
+      } else if (e.key === '1') {
+        setState((prev) => ({ ...prev, edition: 'foundations' }));
+      } else if (e.key === '2') {
+        setState((prev) => ({ ...prev, edition: 'practitioner' }));
+      } else if (e.key === '3') {
+        setState((prev) => ({ ...prev, edition: 'formal' }));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [maxBeatIdx]);
+
+  // Build real, beat-specific numeric proof lines from the live trace
   const liveCardLines = useMemo(() => {
-    if (!activeTrace) return [];
-    const tokens = activeTrace.tokens;
-    const tokenIds = activeTrace.tokenIds;
-    const qIdx = resolvedQueryIdx;
-    const kIdx = resolvedKeyIdx;
-    const qToken = tokens[qIdx] ?? '';
-    const kToken = tokens[kIdx] ?? '';
+    if (!activeTrace || !baseline || !initInfo) return [];
+    const { tokens, trace } = activeTrace;
+    const qTokObj = tokens[resolvedQueryIdx];
+    const qTok = formatTokenExplicit(qTokObj.text);
+    const kTok = formatTokenExplicit(tokens[resolvedKeyIdx].text);
 
-    // Chapter 1 telemetry: Tokenization, BPE, Vocab IDs, Context Window
-    if (state.chapterId === 1) {
+    // Chapter 1 telemetry
+    if (activeSceneBeat === 'ch1-1-extremes') {
       const charCount = state.prompt.length;
-      const tokCount = tokens.length;
-      const compression = (charCount / Math.max(1, tokCount)).toFixed(2);
-      const totalSteps = bpeSteps.length;
-      const curStep = bpeSteps[Math.min(bpeStepIdx, totalSteps - 1)];
-
-      switch (activeSceneBeat) {
-        case 'ch1-1-extremes':
-          return [
-            `Input text: "${state.prompt.slice(0, 48)}..."`,
-            `Character count: ${charCount} chars | Subword tokens: ${tokCount} tokens`,
-            `Compression ratio: ${compression} chars/token (Saves attention operations)`,
-            `Vocabulary bound: |V| = 512 entries (Prevents parameter explosion)`,
-          ];
-        case 'ch1-2-bpe-merges':
-          return [
-            `BPE merge replay: step ${curStep?.step ?? 0} of ${Math.max(0, totalSteps - 1)}`,
-            curStep?.mergedResult
-              ? `Merged: "${curStep.mergedPair?.[0]}" + "${curStep.mergedPair?.[1]}" → "${curStep.mergedResult}" (Rank #${curStep.mergeRank})`
-              : `Status: Base character partition (${curStep?.pieces.length ?? 0} fragments)`,
-            `Active fragments: [${(curStep?.pieces ?? []).slice(0, 10).map((p) => `"${p}"`).join(', ')}${(curStep?.pieces.length ?? 0) > 10 ? ', ...' : ''}]`,
-          ];
-        case 'ch1-3-spaces-blindspot': {
-          const withSpaceId = initInfo?.tokenizer.vocab.indexOf(' ' + qToken.trim());
-          const noSpaceId = initInfo?.tokenizer.vocab.indexOf(qToken.trim());
-          return [
-            `Active Token: "${formatTokenExplicit(qToken)}" (ID #${tokenIds[qIdx]})`,
-            `With space variant: " ${qToken.trim()}" → ${withSpaceId !== undefined && withSpaceId >= 0 ? `ID #${withSpaceId}` : 'Not in vocab'}`,
-            `No space variant: "${qToken.trim()}" → ${noSpaceId !== undefined && noSpaceId >= 0 ? `ID #${noSpaceId}` : 'Not in vocab'}`,
-            `Key rule: Space characters are bound to subword prefixes, not separate tokens.`,
-          ];
-        }
-        case 'ch1-4-token-ids': {
-          const minId = Math.min(...tokenIds);
-          const maxId = Math.max(...tokenIds);
-          return [
-            `Token IDs tensor x ∈ {0..511}^${tokens.length}:`,
-            `[${tokenIds.slice(0, 12).join(', ')}${tokenIds.length > 12 ? ', ...' : ''}]`,
-            `Min ID: #${minId} | Max ID: #${maxId} | Model d_model: 128`,
-            `Parameter memory lookup: ${tokens.length} rows × 128 cols = ${tokens.length * 128 * 4} bytes`,
-          ];
-        }
-        case 'ch1-5-context-window':
-          return [
-            `Sequence length T: ${tokens.length} of 64 slots occupied`,
-            `Remaining generation budget: ${64 - tokens.length} slots`,
-            `Attention matrix size: [${tokens.length} × ${tokens.length}] = ${tokens.length * tokens.length} cells`,
-            `Max capacity matrix at T=64: [64 × 64] = 4,096 cells`,
-          ];
-        default:
-          return [];
-      }
+      return [
+        `Your sentence: ${charCount} characters → ${tokens.length} BPE subword tokens`,
+        `Compression ratio: ${(charCount / Math.max(1, tokens.length)).toFixed(2)} chars/token (reduces attention pairs from ${charCount * charCount} to ${tokens.length * tokens.length})`,
+      ];
+    }
+    if (activeSceneBeat === 'ch1-2-bpe-merges') {
+      const snap = bpeSteps[safeBpeStep];
+      if (!snap) return [];
+      return [
+        `Merge step ${snap.step} of ${Math.max(0, bpeSteps.length - 1)} · Current count: ${snap.pieces.length} pieces`,
+        snap.mergedPair
+          ? `Applied rule #${snap.mergeRank}: "${formatTokenExplicit(snap.mergedPair[0])}" + "${formatTokenExplicit(snap.mergedPair[1])}" → "${formatTokenExplicit(snap.mergedResult ?? '')}"`
+          : 'Drag the Merge Step slider on stage to watch BPE compress your text.',
+      ];
+    }
+    if (activeSceneBeat === 'ch1-3-spaces-blindspot') {
+      const withLeadingSpace = tokens.filter((t) => t.text.startsWith(' ')).length;
+      return [
+        `Selected token: "${qTok}" (ID #${qTokObj.id}, ${qTokObj.text.length} characters hidden inside 1 ID)`,
+        `${withLeadingSpace} of ${tokens.length} tokens in your sentence carry a glued leading space ("·")`,
+      ];
+    }
+    if (activeSceneBeat === 'ch1-4-token-ids') {
+      return [
+        `Token ID array (first 10): [${tokens.slice(0, 10).map((t) => t.id).join(', ')}${tokens.length > 10 ? ', ...' : ''}]`,
+        `Selected "${qTok}" = #${qTokObj.id} of 512 vocabulary entries`,
+      ];
+    }
+    if (activeSceneBeat === 'ch1-5-context-window') {
+      const rawCount =
+        bpeSteps.length > 0 ? bpeSteps[bpeSteps.length - 1].pieces.length : tokens.length;
+      return [
+        `Used slots: ${tokens.length} / 64 · Remaining desk capacity: ${64 - tokens.length} tokens`,
+        rawCount > 64
+          ? `Truncated ${rawCount - 64} tokens past slot 64 (invisible to the model)`
+          : 'All tokens fit inside our 64-token context window.',
+      ];
     }
 
-    // Chapter 2 telemetry: Embeddings, PCA, Order-Blindness, wpe & RoPE
-    if (state.chapterId === 2) {
-      const activeId = tokenIds[qIdx];
-      switch (activeSceneBeat) {
-        case 'ch2-1-wte-lookup': {
-          if (!wteWeights) return ['Loading W_e weight tensor [512 × 128]...'];
-          const base = activeId * 128;
-          const slice = Array.from(wteWeights.slice(base, base + 128));
-          const stats = computeVectorStats(slice);
-          return [
-            `Token: "${formatToken(qToken)}" | Vocabulary row: #${activeId}`,
-            `Row vector: wte[${activeId}, :] ∈ ℝ¹²⁸`,
-            `L2 Norm ||wte||: ${formatNum(stats.l2Norm, 3)} | Mean: ${formatNum(stats.mean, 4)}`,
-            `Coordinate range: [${formatNum(stats.min, 3)}, ${formatNum(stats.max, 3)}] (Std: ${formatNum(stats.std, 3)})`,
-          ];
-        }
-        case 'ch2-2-pca-cloud': {
-          const topVar = pcaCloud?.explainedVariance ?? [0, 0, 0];
-          const sumVar = ((topVar[0] + topVar[1] + topVar[2]) * 100).toFixed(1);
-          const neighbors =
-            wteWeights && initInfo?.tokenizer
-              ? findCosineNeighbors(
-                  wteWeights,
-                  initInfo.tokenizer.vocab,
-                  128,
-                  activeId,
-                  3
-                )
-              : [];
-          return [
-            `Target Token: "${formatToken(qToken)}" (#${activeId})`,
-            `PCA Explained Variance: PC1 ${(topVar[0] * 100).toFixed(1)}%, PC2 ${(topVar[1] * 100).toFixed(1)}%, PC3 ${(topVar[2] * 100).toFixed(1)}% (Total: ${sumVar}%)`,
-            `Top Cosine Neighbors in ℝ¹²⁸:`,
-            ...neighbors.map(
-              (n) => `  • "${formatToken(n.text)}" (#${n.id}) → cos = ${formatNum(n.cosine, 3)}`
-            ),
-          ];
-        }
-        case 'ch2-3-order-blind':
-          return [
-            `Permutation test: Sequence of ${tokens.length} tokens`,
-            `Self-Attention without position: Attention(P·X) = P·Attention(X)`,
-            `Status: Raw word embeddings alone have ZERO directional or syntactic order.`,
-            `Required fix: Positional encoding must be injected into the residual stream.`,
-          ];
-        case 'ch2-4-wpe-add':
-          return [
-            `Token: "${formatToken(qToken)}" at slot index ${qIdx}`,
-            `Embedding formula: h_${qIdx}^(0) = wte[#${activeId}] + wpe[#${qIdx}]`,
-            `wte tensor: [512, 128] | wpe tensor: [64, 128]`,
-            `Output representation h_${qIdx}^(0) ∈ ℝ¹²⁸ ready for Block 0`,
-          ];
-        case 'ch2-5-rope': {
-          const delta = ropeSlotB - ropeSlotA;
-          const deltaDeg = Math.round((Math.abs(delta * 0.35) * 180) / Math.PI);
-          return [
-            `Rotary Position Embedding (Su et al., 2021):`,
-            `Slot A: ${ropeSlotA} | Slot B: ${ropeSlotB} | Relative distance: ${delta} slots`,
-            `Rotation offset: Δθ = ${deltaDeg}° across first feature pair`,
-            `Advantage: Relative distance invariant <R_m q, R_n k> = g(q, k, m-n)`,
-          ];
-        }
-        default:
-          return [];
-      }
+    // Chapter 2 telemetry
+    if (activeSceneBeat === 'ch2-1-wte-lookup') {
+      const st = computeVectorStats(trace.tokEmb[resolvedQueryIdx]);
+      return [
+        `wte.weight[${qTokObj.id}] ("${qTok}"): 128 floats · ||v|| = ${formatNum(st.l2Norm, 3)}`,
+        `Range: [${formatNum(st.min, 3)}, ${formatNum(st.max, 3)}] · mean = ${formatNum(st.mean, 4)}`,
+      ];
+    }
+    if (activeSceneBeat === 'ch2-2-pca-cloud' && wteWeights && pcaCloud) {
+      const nbs = findCosineNeighbors(
+        wteWeights,
+        initInfo.tokenizer.vocab,
+        initInfo.manifest.config.d_model,
+        qTokObj.id,
+        5
+      );
+      const varPct =
+        (pcaCloud.explainedVariance[0] +
+          pcaCloud.explainedVariance[1] +
+          pcaCloud.explainedVariance[2]) *
+        100;
+      return [
+        `Top 128D cosine neighbors of "${qTok}": ${nbs.map((n) => `"${formatToken(n.text)}" (${n.cosine.toFixed(2)})`).join(', ')}`,
+        `3D PCA captures ${varPct.toFixed(1)}% of total variance across all 512 real embeddings`,
+      ];
+    }
+    if (activeSceneBeat === 'ch2-3-order-blind') {
+      return [
+        'Without wpe/RoPE: permuting token order produces the exact same multiset of [128] vectors.',
+      ];
+    }
+    if (activeSceneBeat === 'ch2-4-wpe-add') {
+      const eNorm = vectorL2Norm(trace.tokEmb[resolvedQueryIdx]);
+      const pNorm = vectorL2Norm(trace.posEmb[resolvedQueryIdx]);
+      const h0Vec = trace.tokEmb[resolvedQueryIdx].map(
+        (v, i) => v + trace.posEmb[resolvedQueryIdx][i]
+      );
+      return [
+        `Slot ${resolvedQueryIdx} ("${qTok}"): ||wte|| = ${formatNum(eNorm, 3)} + ||wpe[${resolvedQueryIdx}]|| = ${formatNum(pNorm, 3)} → ||h₀|| = ${formatNum(vectorL2Norm(h0Vec), 3)}`,
+        `Starting Residual Stream slab shape entering Block 0: [${tokens.length} × 128]`,
+      ];
+    }
+    if (activeSceneBeat === 'ch2-5-rope') {
+      const delta = ropeSlotB - ropeSlotA;
+      const rad = (delta * Math.PI) / 10;
+      return [
+        `Slot A = ${ropeSlotA} (${ropeSlotA * 18}°) · Slot B = ${ropeSlotB} (${ropeSlotB * 18}°) → Distance Δ = ${delta}`,
+        `Relative angle Δθ = ${delta * 18}° · cos(Δθ) = ${Math.cos(rad).toFixed(3)} (invariant to shifting both slots equally)`,
+      ];
     }
 
-    // Chapter 3 telemetry: Residual Highway, Break-It Lab, LayerNorm & RMSNorm
-    if (state.chapterId === 3) {
-      const isCut = hasResidualAblation(state.ablation);
-      const isLnOff = isFinalLnDisabled(state.ablation);
-      switch (activeSceneBeat) {
-        case 'ch3-1-residual-bus': {
-          const topToken = activeTrace.tokens[tokens.length - 1];
-          const topNext = activeTrace.predictions?.[0]?.token ?? '';
-          const topProb = ((activeTrace.predictions?.[0]?.prob ?? 0) * 100).toFixed(1);
-          return [
-            `Residual state recurrence: h_(l+1) = h_l + SubBlock(LN(h_l))`,
-            `Model highway dimension: d_model = 128 across 4 Transformer Blocks`,
-            `Final prediction after 4 layers: "${topNext}" (${topProb}%) following "${topToken}"`,
-            `Identity shortcut guarantees gradient flow without vanishing or exploding.`,
-          ];
-        }
-        case 'ch3-2-cut-highway': {
-          const top1 = activeTrace.predictions?.[0];
-          const base1 = baselineTrace?.predictions?.[0];
-          return [
-            `Residual Status: ${isCut ? 'SEVERED (All shortcuts disabled)' : 'INTACT (Normal)'}`,
-            isCut
-              ? `CRITICAL FAILURE: Predictions collapsed into gibberish!`
-              : `Healthy: Identity shortcut preserves earlier token memory.`,
-            `Active top prediction: "${top1?.token ?? ''}" (${((top1?.prob ?? 0) * 100).toFixed(1)}%)`,
-            `Baseline unablated: "${base1?.token ?? ''}" (${((base1?.prob ?? 0) * 100).toFixed(1)}%)`,
-          ];
-        }
-        case 'ch3-3-layernorm':
-          return [
-            `Pre-LayerNorm formula: y = (x − μ) / √(σ² + 1e-5) · γ + β`,
-            `Parameters: γ ∈ ℝ¹²⁸ (scale) and β ∈ ℝ¹²⁸ (shift)`,
-            `Normalized input guarantee: Mean = 0.000, Variance = 1.000`,
-            `Benefit: Stabilizes inputs to Attention and MLP across all 4 layers.`,
-          ];
-        case 'ch3-4-rmsnorm':
-          return [
-            `RMSNorm formula: y = x / RMS(x) · γ  where RMS(x) = √(1/d ∑ x_i² + ε)`,
-            `Final LN_f status: ${isLnOff ? 'DISABLED' : 'ENABLED'}`,
-            `Comparison: RMSNorm skips μ centering, saving GPU memory bandwidth.`,
-            `Used in frontier models: LLaMA, Mistral, Gemma 2.`,
-          ];
-        default:
-          return [];
+    // Chapter 3 telemetry
+    if (activeSceneBeat === 'ch3-1-residual-bus' || activeSceneBeat === 'ch3-2-cut-highway') {
+      const baseTop = baseline.trace.greedyNextTokenId;
+      const curTop = trace.greedyNextTokenId;
+      const cut = hasResidualAblation(state.ablation);
+      const lines = [
+        `Residual Highway: ${cut ? 'CUT (skip connections disabled)' : 'Intact (x + ΔAttn + ΔMLP)'}`,
+        `Prediction: "${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}" (${(baseline.trace.finalProbs[baseTop] * 100).toFixed(1)}%)${
+          ablated
+            ? ` → "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`
+            : ''
+        }`,
+      ];
+      if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
+        const dL = ablated.trace.inputLoss - baseline.trace.inputLoss;
+        lines.push(
+          `Cross-entropy loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dL >= 0 ? '+' : ''}${dL.toFixed(3)})`
+        );
       }
+      return lines;
+    }
+    if (activeSceneBeat === 'ch3-3-layernorm') {
+      const lt = trace.layers[state.layer];
+      if (lt.skipped) return [`Block ${state.layer} is disabled.`];
+      const rawSt = computeVectorStats(lt.residualBeforeAttn[resolvedQueryIdx]);
+      const lnSt = computeVectorStats(lt.ln1Out[resolvedQueryIdx]);
+      return [
+        `Before LN₁ ("${qTok}", Block ${state.layer}): mean = ${formatNum(rawSt.mean, 3)} · std = ${formatNum(rawSt.std, 3)} · range [${formatNum(rawSt.min, 2)}, ${formatNum(rawSt.max, 2)}]`,
+        `After LN₁: mean = ${formatNum(lnSt.mean, 3)} · std = ${formatNum(lnSt.std, 3)} · range [${formatNum(lnSt.min, 2)}, ${formatNum(lnSt.max, 2)}]`,
+      ];
+    }
+    if (activeSceneBeat === 'ch3-4-rmsnorm') {
+      const lnOff = isFinalLnDisabled(state.ablation);
+      const baseTop = baseline.trace.greedyNextTokenId;
+      const curTop = trace.greedyNextTokenId;
+      const lines = [
+        `Final LN_f: ${lnOff ? 'DISABLED' : 'Active'} · Top guess: "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`,
+      ];
+      if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
+        const dL = ablated.trace.inputLoss - baseline.trace.inputLoss;
+        lines.push(
+          `Loss shift vs. baseline ("${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}"): ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dL >= 0 ? '+' : ''}${dL.toFixed(3)})`
+        );
+      } else {
+        const st = computeVectorStats(trace.lnFOut[resolvedQueryIdx]);
+        lines.push(`ln_f output ("${qTok}"): mean = ${formatNum(st.mean, 3)} · rms = ${formatNum(st.rms, 3)}`);
+      }
+      return lines;
     }
 
-    // Chapter 4 telemetry: Self-Attention flagship
-    const qVec = activeTrace.q?.[state.layer]?.[state.head]?.[qIdx] ?? [];
-    const kVec = activeTrace.k?.[state.layer]?.[state.head]?.[kIdx] ?? [];
-    const breakdown = computeDotProductBreakdown(qVec, kVec, 32);
+    // Chapter 4 telemetry
+    const lt = trace.layers[state.layer];
+    if (lt.skipped) return [`Block ${state.layer} is disabled by Ablation.`];
+    const active: ActiveLayerTrace = lt;
+    const rowW = active.attn.attnWeights[state.head][resolvedQueryIdx];
+    const rowS = active.attn.rawScores[state.head][resolvedQueryIdx];
 
-    const matrix = activeTrace.attention?.[state.layer]?.[state.head] ?? [];
-    const currentWeight = matrix[qIdx]?.[kIdx] ?? 0;
+    if (activeSceneBeat === 'attn-1-problem') {
+      const topId = trace.greedyNextTokenId;
+      return [
+        `Sentence length: ${tokens.length} BPE tokens · Highlighted Query: "${qTok}" (slot ${resolvedQueryIdx})`,
+        `Current model top guess after all 4 blocks: "${formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
+      ];
+    }
+    if (activeSceneBeat === 'attn-2-dot-product') {
+      const bd = computeDotProductBreakdown(
+        active.attn.q[state.head][resolvedQueryIdx],
+        active.attn.k[state.head][resolvedKeyIdx]
+      );
+      return [
+        `Comparing Q("${qTok}") · K("${kTok}") in Block ${state.layer} Head ${state.head} (32 dims):`,
+        `Positive votes: +${formatNum(bd.positiveVotes, 2)} · Negative votes: ${formatNum(bd.negativeVotes, 2)} → Raw dot = ${formatNum(bd.rawDot, 3)}`,
+        `Scaled score = ${formatNum(bd.rawDot, 3)} ÷ √32 (${formatNum(bd.scaleDivisor, 3)}) = ${formatNum(bd.scaledScore, 3)}`,
+      ];
+    }
+    if (activeSceneBeat === 'attn-3-scan-row') {
+      let maxC = 0;
+      let minC = 0;
+      for (let c = 1; c < tokens.length; c++) {
+        if (rowS[c] > rowS[maxC]) maxC = c;
+        if (rowS[c] < rowS[minC]) minC = c;
+      }
+      return [
+        `Query "${qTok}" scanned ${tokens.length} Keys in Block ${state.layer} Head ${state.head}:`,
+        `Highest raw score: "${formatTokenExplicit(tokens[maxC].text)}" (${formatNum(rowS[maxC], 2)}) · Lowest: "${formatTokenExplicit(tokens[minC].text)}" (${formatNum(rowS[minC], 2)})`,
+      ];
+    }
+    if (activeSceneBeat === 'attn-4-mask-softmax') {
+      const rowSum = rowW.reduce((a, b) => a + b, 0);
+      const maskedCount = tokens.length - 1 - resolvedQueryIdx;
+      let bestC = 0;
+      for (let c = 1; c <= resolvedQueryIdx; c++) {
+        if (rowW[c] > rowW[bestC]) bestC = c;
+      }
+      return [
+        `Future tokens sealed by Causal Mask: ${maskedCount} · Surviving tokens: ${resolvedQueryIdx + 1}`,
+        `Post-Softmax winner: "${formatTokenExplicit(tokens[bestC].text)}" (${(rowW[bestC] * 100).toFixed(1)}%) · Exact row sum = ${rowSum.toFixed(6)}`,
+      ];
+    }
+    if (activeSceneBeat === 'attn-5-value-mixer') {
+      const top3 = rowW
+        .slice(0, resolvedQueryIdx + 1)
+        .map((w, idx) => ({ idx, w }))
+        .sort((a, b) => b.w - a.w)
+        .slice(0, 3);
+      return [
+        `Value blend poured into "${qTok}" (Block ${state.layer} Head ${state.head}):`,
+        `${top3.map((x) => `${(x.w * 100).toFixed(0)}% V("${formatTokenExplicit(tokens[x.idx].text)}")`).join(' + ')} + ...`,
+      ];
+    }
 
-    const topPred = activeTrace.predictions?.[0];
-    const basePred = baselineTrace?.predictions?.[0];
-
-    const lines: string[] = [
-      `Prompt: "${state.prompt.slice(0, 42)}..." (${tokens.length} tokens)`,
-      `Layer: ${state.layer} of 3 | Head: ${state.head} of 3 | d_k = 32`,
-      `Active Query [${qIdx}]: "${formatToken(qToken)}" | Active Key [${kIdx}]: "${formatToken(kToken)}"`,
-      `Raw Dot Product: ${formatNum(breakdown.rawDot, 3)}`,
-      `Scaled by 1/√32 (÷5.657): ${formatNum(breakdown.scaledScore, 3)}`,
-      `Softmax Attention Weight: ${(currentWeight * 100).toFixed(1)}%`,
+    const baseTop = baseline.trace.greedyNextTokenId;
+    const curTop = trace.greedyNextTokenId;
+    const off = isHeadDisabled(state.ablation, state.layer, state.head);
+    const lines = [
+      `Block ${state.layer} Head ${state.head}: ${off ? 'DISABLED (Z_h zeroed before W_o)' : 'Active'} · Matrix [${tokens.length} × ${tokens.length}]`,
+      `Prediction: "${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}" (${(baseline.trace.finalProbs[baseTop] * 100).toFixed(1)}%)${
+        ablated
+          ? ` → "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`
+          : ''
+      }`,
     ];
-
-    if (hasActiveAblation(state.ablation)) {
+    if (ablated && baseline.trace.inputLoss !== null && ablated.trace.inputLoss !== null) {
+      const dLoss = ablated.trace.inputLoss - baseline.trace.inputLoss;
       lines.push(
-        `Ablation active! Top prediction: "${topPred?.token ?? ''}" (${((topPred?.prob ?? 0) * 100).toFixed(1)}% vs. base ${((basePred?.prob ?? 0) * 100).toFixed(1)}%)`
-      );
-    } else {
-      lines.push(
-        `Top predicted next token: "${topPred?.token ?? ''}" (${((topPred?.prob ?? 0) * 100).toFixed(1)}% confidence)`
+        `Prompt cross-entropy loss: ${baseline.trace.inputLoss.toFixed(3)} → ${ablated.trace.inputLoss.toFixed(3)} (${dLoss >= 0 ? '+' : ''}${dLoss.toFixed(3)})`
       );
     }
-
     return lines;
   }, [
-    state.chapterId,
+    activeTrace,
+    baseline,
+    ablated,
+    initInfo,
     activeSceneBeat,
     state.prompt,
-    resolvedQueryIdx,
-    resolvedKeyIdx,
     state.layer,
     state.head,
     state.ablation,
-    activeTrace,
-    baselineTrace,
+    resolvedQueryIdx,
+    resolvedKeyIdx,
+    bpeSteps,
+    safeBpeStep,
     wteWeights,
     pcaCloud,
-    bpeSteps,
-    bpeStepIdx,
     ropeSlotA,
     ropeSlotB,
-    initInfo,
   ]);
 
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
+  const resCut = hasResidualAblation(state.ablation);
+  const lnFOff = isFinalLnDisabled(state.ablation);
+
   return (
-    <div className="atlas-app">
-      {/* Top Application Bar */}
-      <header className="app-header">
-        <div className="app-brand">
+    <div className="book-app">
+      <header className="topbar">
+        <div className="brand-lockup">
           <span className="brand-title">LLM Atlas</span>
-          <span className="brand-tag">Interactive Textbook</span>
+          <span className="brand-tag">Interactive Transformer Textbook</span>
         </div>
 
         <form
-          className="prompt-bar"
+          className="prompt-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (inputVal.trim()) {
-              setState((prev) => ({
-                ...prev,
-                prompt: inputVal.trim(),
-                queryIdx: null,
-                keyIdx: null,
-              }));
-            }
+            if (!draftPrompt.trim()) return;
+            setBpeStepIdx(0);
+            setState((prev) => ({
+              ...prev,
+              prompt: draftPrompt,
+              queryIdx: null,
+              keyIdx: null,
+            }));
           }}
         >
+          <input
+            className="prompt-input"
+            value={draftPrompt}
+            onChange={(e) => setDraftPrompt(e.target.value)}
+            placeholder="Type any sentence to test live..."
+            aria-label="Prompt sentence"
+          />
           <select
             className="preset-select"
-            aria-label="Example prompt presets"
+            value=""
+            aria-label="Example prompts"
             onChange={(e) => {
-              const val = e.target.value;
-              setInputVal(val);
+              const p = PRESET_PROMPTS.find((x) => x.id === e.target.value);
+              if (!p) return;
+              setDraftPrompt(p.text);
+              setBpeStepIdx(0);
               setState((prev) => ({
                 ...prev,
-                prompt: val,
+                prompt: p.text,
                 queryIdx: null,
                 keyIdx: null,
               }));
             }}
           >
-            <option value="">Presets...</option>
+            <option value="">Examples...</option>
             {PRESET_PROMPTS.map((p) => (
-              <option key={p.id} value={p.text}>
+              <option key={p.id} value={p.id}>
                 {p.label}
               </option>
             ))}
           </select>
-
-          <input
-            type="text"
-            className="prompt-input"
-            value={inputVal}
-            onChange={(e) => setInputVal(e.target.value)}
-            placeholder="Type any sentence to see real live tensors..."
-          />
-
-          <button type="submit" className="primary-btn">
-            Run
+          <button type="submit" className="primary-btn" disabled={busy || !initInfo}>
+            {busy ? 'Tracing...' : 'Run'}
           </button>
         </form>
 
-        <div className="header-actions">
+        <div className="topbar-right">
           <button
             type="button"
-            className="secondary-btn"
-            onClick={() => {
-              const text = window.location.href;
-              navigator.clipboard?.writeText(text);
-              alert('Copied direct shareable link to this exact state!');
-            }}
+            className={`mini-btn ${state.lectureMode ? 'is-active' : ''}`}
+            onClick={() =>
+              setState((prev) => ({ ...prev, lectureMode: !prev.lectureMode }))
+            }
           >
-            Share Link
+            {state.lectureMode ? 'Show Book' : 'Lecture Mode'}
+          </button>
+          <button type="button" className="mini-btn" onClick={() => void copyLink()}>
+            {copied ? 'Copied' : 'Share'}
           </button>
         </div>
       </header>
 
-      {/* Main Split-Screen Workspace */}
-      <main className="workspace">
+      <div className={`workspace ${state.lectureMode ? 'is-lecture' : ''}`}>
         <BookReader
           chapter={chapter}
           beat={activeBeat}
@@ -557,65 +640,74 @@ export default function App() {
           }
         />
 
-        {/* 3D Visual Stage */}
-        <section className="stage-pane" aria-label="3D Interactive Simulation">
-          {/* Floating HUD Controls */}
+        <section className="stage-pane" aria-label="Interactive 3D Stage">
+          <div ref={mountRef} className="canvas-mount" />
+
+          {!initInfo && !error && (
+            <div className="loading-pill">
+              Loading 862,464 real trained parameters...
+            </div>
+          )}
+
+          {error && <div className="error-toast">{error}</div>}
+
           <div className="stage-hud-top">
-            {state.chapterId === 1 && activeSceneBeat === 'ch1-2-bpe-merges' && (
-              <div className="hud-group">
-                <span className="hud-label">Merge Step:</span>
-                <label className="hud-slider">
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0, bpeSteps.length - 1)}
-                    value={Math.min(
-                      bpeStepIdx,
-                      Math.max(0, bpeSteps.length - 1)
-                    )}
-                    onChange={(e) => setBpeStepIdx(Number(e.target.value))}
-                  />
-                  <span className="mono">
-                    {Math.min(bpeStepIdx, Math.max(0, bpeSteps.length - 1))}
-                  </span>
-                </label>
-              </div>
-            )}
+            <div className="hud-group">
+              {activeSceneBeat === 'ch1-2-bpe-merges' && bpeSteps.length > 1 && (
+                <>
+                  <label className="hud-slider mono">
+                    <span>Merge Step {safeBpeStep}/{bpeSteps.length - 1}</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={bpeSteps.length - 1}
+                      value={safeBpeStep}
+                      onChange={(e) => setBpeStepIdx(Number(e.target.value))}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="mini-btn"
+                    onClick={() =>
+                      setBpeStepIdx((s) =>
+                        s >= bpeSteps.length - 1 ? 0 : s + 1
+                      )
+                    }
+                  >
+                    Step +1
+                  </button>
+                </>
+              )}
 
-            {state.chapterId === 2 && activeSceneBeat === 'ch2-5-rope' && (
-              <div className="hud-group">
-                <span className="hud-label">Slot A:</span>
-                <label className="hud-slider">
-                  <input
-                    type="range"
-                    min={0}
-                    max={32}
-                    value={ropeSlotA}
-                    onChange={(e) => setRopeSlotA(Number(e.target.value))}
-                  />
-                  <span className="mono">{ropeSlotA}</span>
-                </label>
-                <span className="hud-label" style={{ marginLeft: 6 }}>
-                  Slot B:
-                </span>
-                <label className="hud-slider">
-                  <input
-                    type="range"
-                    min={0}
-                    max={32}
-                    value={ropeSlotB}
-                    onChange={(e) => setRopeSlotB(Number(e.target.value))}
-                  />
-                  <span className="mono">{ropeSlotB}</span>
-                </label>
-              </div>
-            )}
+              {activeSceneBeat === 'ch2-5-rope' && (
+                <>
+                  <label className="hud-slider mono">
+                    <span>Slot A: {ropeSlotA}</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={24}
+                      value={ropeSlotA}
+                      onChange={(e) => setRopeSlotA(Number(e.target.value))}
+                    />
+                  </label>
+                  <label className="hud-slider mono">
+                    <span>Slot B: {ropeSlotB}</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={24}
+                      value={ropeSlotB}
+                      onChange={(e) => setRopeSlotB(Number(e.target.value))}
+                    />
+                  </label>
+                </>
+              )}
 
-            {state.chapterId === 3 && activeSceneBeat === 'ch3-2-cut-highway' && (
-              <div className="hud-group">
+              {activeSceneBeat === 'ch3-2-cut-highway' && (
                 <button
                   type="button"
-                  className={`hud-pill ${hasResidualAblation(state.ablation) ? 'is-active' : ''}`}
+                  className={`mini-btn ${resCut ? 'is-warm' : 'is-active'}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -623,18 +715,14 @@ export default function App() {
                     }))
                   }
                 >
-                  {hasResidualAblation(state.ablation)
-                    ? 'Restore Residual Highway'
-                    : 'Cut Residuals (Break-It Lab)'}
+                  {resCut ? 'Reconnect Residual Highway' : 'Cut Residual Highway'}
                 </button>
-              </div>
-            )}
+              )}
 
-            {state.chapterId === 3 && activeSceneBeat === 'ch3-4-rmsnorm' && (
-              <div className="hud-group">
+              {activeSceneBeat === 'ch3-4-rmsnorm' && (
                 <button
                   type="button"
-                  className={`hud-pill ${isFinalLnDisabled(state.ablation) ? 'is-active' : ''}`}
+                  className={`mini-btn ${lnFOff ? 'is-warm' : 'is-active'}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -642,138 +730,147 @@ export default function App() {
                     }))
                   }
                 >
-                  {isFinalLnDisabled(state.ablation)
-                    ? 'Restore Final LayerNorm'
-                    : 'Disable Final LN (LN_f)'}
+                  {lnFOff ? 'Restore Final LN_f' : 'Disable Final LN_f'}
                 </button>
-              </div>
-            )}
+              )}
 
-            {state.chapterId === 4 && (
-              <>
-                <div className="hud-group" role="group" aria-label="Layer selector">
-                  <span className="hud-label">Layer:</span>
+              {(activeSceneBeat === 'ch3-3-layernorm' || state.chapterId === 4) && (
+                <>
+                  <span className="hud-label">Block</span>
                   {[0, 1, 2, 3].map((l) => (
                     <button
                       key={l}
                       type="button"
-                      className={`hud-pill ${state.layer === l ? 'is-active' : ''}`}
+                      className={`mini-btn mono ${state.layer === l ? 'is-active' : ''}`}
                       onClick={() => setState((prev) => ({ ...prev, layer: l }))}
                     >
-                      L{l}
+                      {l}
                     </button>
                   ))}
-                </div>
+                </>
+              )}
 
-                <div className="hud-group" role="group" aria-label="Head selector">
-                  <span className="hud-label">Head:</span>
+              {state.chapterId === 4 && (
+                <>
+                  <span className="hud-label">Head</span>
                   {[0, 1, 2, 3].map((h) => {
-                    const disabled = isHeadDisabled(
-                      state.ablation,
-                      state.layer,
-                      h
-                    );
+                    const off = isHeadDisabled(state.ablation, state.layer, h);
                     return (
                       <button
                         key={h}
                         type="button"
-                        className={`hud-pill ${state.head === h ? 'is-active' : ''} ${
-                          disabled ? 'is-disabled' : ''
+                        className={`mini-btn mono ${
+                          off ? 'is-warm' : state.head === h ? 'is-active' : ''
                         }`}
-                        onClick={() =>
-                          setState((prev) => ({ ...prev, head: h }))
-                        }
+                        onClick={() => setState((prev) => ({ ...prev, head: h }))}
                       >
                         H{h}
                       </button>
                     );
                   })}
-                </div>
+                </>
+              )}
 
-                <div className="hud-group">
-                  <button
-                    type="button"
-                    className={`hud-pill ${state.showPreSoftmax ? 'is-active' : ''}`}
-                    onClick={() =>
-                      setState((prev) => ({
-                        ...prev,
-                        showPreSoftmax: !prev.showPreSoftmax,
-                      }))
-                    }
-                  >
-                    {state.showPreSoftmax ? 'Logits (Pre-Softmax)' : 'Softmax Weights'}
-                  </button>
+              {activeSceneBeat === 'attn-4-mask-softmax' && (
+                <button
+                  type="button"
+                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      showPreSoftmax: !prev.showPreSoftmax,
+                    }))
+                  }
+                >
+                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}
+                </button>
+              )}
 
-                  <button
-                    type="button"
-                    className={`hud-pill ${
-                      isHeadDisabled(state.ablation, state.layer, state.head)
-                        ? 'is-active'
-                        : ''
-                    }`}
-                    onClick={() =>
-                      setState((prev) => ({
-                        ...prev,
-                        ablation: toggleHeadDisabled(
-                          prev.ablation,
-                          state.layer,
-                          state.head
-                        ),
-                      }))
-                    }
-                  >
-                    {isHeadDisabled(state.ablation, state.layer, state.head)
-                      ? 'Un-ablate Head'
-                      : 'Ablate Head'}
-                  </button>
-                </div>
-              </>
-            )}
+              {(activeSceneBeat === 'attn-5-value-mixer' ||
+                activeSceneBeat === 'attn-6-multihead-full') && (
+                <button
+                  type="button"
+                  className={`mini-btn ${headOff ? 'is-warm' : ''}`}
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      ablation: toggleHeadDisabled(
+                        prev.ablation,
+                        prev.layer,
+                        prev.head
+                      ),
+                    }))
+                  }
+                >
+                  {headOff ? `Re-enable H${state.head}` : `Disable H${state.head}`}
+                </button>
+              )}
+            </div>
 
-            <div className="camera-hint">Click + drag to rotate 3D camera</div>
+            <div className="hud-group">
+              {hasActiveAblation(state.ablation) && (
+                <button
+                  type="button"
+                  className="mini-btn is-warm"
+                  onClick={() => setState((prev) => ({ ...prev, ablation: {} }))}
+                >
+                  Reset Ablation
+                </button>
+              )}
+              <button
+                type="button"
+                className="mini-btn"
+                onClick={() => stageRef.current?.resetCamera()}
+              >
+                Reset View
+              </button>
+            </div>
           </div>
 
-          <div ref={stageMountRef} className="stage-viewport" />
+          {activeTrace && (
+            <div className="stage-hud-bottom">
+              <div className="token-bar" aria-label="Select token">
+                <span className="hud-label">
+                  {activeSceneBeat === 'attn-2-dot-product'
+                    ? 'Compare Key:'
+                    : 'Inspect Token:'}
+                </span>
+                {activeTrace.tokens.map((tok, idx) => {
+                  const isQ = idx === resolvedQueryIdx;
+                  const isK =
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx === resolvedKeyIdx;
+                  const disabledKey =
+                    activeSceneBeat === 'attn-2-dot-product' &&
+                    idx > resolvedQueryIdx;
+                  return (
+                    <button
+                      key={`${tok.start}-${idx}`}
+                      type="button"
+                      disabled={disabledKey}
+                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${
+                        isK ? 'is-key' : ''
+                      }`}
+                      onClick={() =>
+                        setState((prev) =>
+                          activeSceneBeat === 'attn-2-dot-product'
+                            ? { ...prev, keyIdx: idx }
+                            : { ...prev, queryIdx: idx, keyIdx: null }
+                        )
+                      }
+                    >
+                      {formatToken(tok.text)}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="camera-hint">
+                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
+              </div>
+            </div>
+          )}
         </section>
-      </main>
-
-      {/* Bottom Status Bar */}
-      <footer className="app-footer">
-        <div className="footer-left">
-          <span>Model: 4 Layers · 4 Heads · d_model=128 · 862,464 Parameters</span>
-          <span>
-            {initInfo ? 'Verified PyTorch Parity (max diff < 1e-4)' : 'Initializing worker...'}
-          </span>
-        </div>
-        <div className="footer-right">
-          <a
-            href="https://github.com/ageanton/llm-atlas"
-            target="_blank"
-            rel="noreferrer"
-            className="footer-link"
-          >
-            GitHub Source &amp; Mathematical Trace
-          </a>
-        </div>
-      </footer>
-
-      {errorMsg && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 36,
-            left: 20,
-            background: '#dc2626',
-            color: '#fff',
-            padding: '8px 12px',
-            borderRadius: 6,
-            fontSize: '0.8rem',
-            zIndex: 99,
-          }}
-        >
-          {errorMsg}
-        </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -1,7 +1,13 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import type { SceneBeatId } from '../content/bookData';
-import type { EngineTraceResult, TokenizerData } from '../engine/types';
-import type { AblationConfig } from '../state/bookState';
+import type {
+  AblationConfig,
+  ActiveLayerTrace,
+  EngineTraceResult,
+  TokenizerData,
+} from '../engine/types';
+import { hasResidualAblation, isFinalLnDisabled } from '../state/bookState';
 import {
   createTensorTexture,
   divergingColor,
@@ -17,14 +23,26 @@ import {
   type PcaCloudData,
 } from '../utils/pass2Math';
 
-export interface Pass2BuildArgs {
-  group: THREE.Group;
+export interface Pass2StageContext {
+  stageRoot: THREE.Group;
+  interactives: THREE.Object3D[];
+  trackGeo: <T extends THREE.BufferGeometry>(g: T) => T;
+  trackMat: <T extends THREE.Material>(m: T) => T;
+  trackTex: <T extends THREE.Texture>(t: T) => T;
+  addLabel: (
+    primary: string,
+    secondary: string | undefined,
+    pos: [number, number, number],
+    scale?: number,
+    accent?: string,
+    muted?: boolean
+  ) => void;
+}
+
+export interface Pass2Snapshot {
   beat: SceneBeatId;
   layer: number;
-  head: number;
   queryIdx: number;
-  keyIdx: number;
-  showPreSoftmax: boolean;
   ablation: AblationConfig;
   traceRes: EngineTraceResult;
   baselineRes: EngineTraceResult;
@@ -35,946 +53,977 @@ export interface Pass2BuildArgs {
   bpeStepIdx: number;
   ropeSlotA: number;
   ropeSlotB: number;
-  makeLabelSprite: (text: string, color?: string, bg?: string) => THREE.Sprite;
-  defaultMat: THREE.Material;
 }
 
-const COLOR_ACCENT = 0x2563eb;
-const COLOR_EMERALD = 0x059669;
-const COLOR_AMBER = 0xd97706;
-const COLOR_ROSE = 0xd946ef;
-const COLOR_GRAY = 0x94a3b8;
-const COLOR_DANGER = 0xdc2626;
-
-function makeTileMesh(
-  w: number,
-  h: number,
-  d: number,
-  color: number,
-  wire = false
-): THREE.Mesh {
-  const geom = new THREE.BoxGeometry(w, h, d);
-  const mat = new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.35,
-    metalness: 0.05,
-    wireframe: wire,
-  });
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
+interface ClickTag {
+  kind: 'token';
+  index: number;
 }
 
-export function buildChapter123Beat(args: Pass2BuildArgs): boolean {
-  const { beat } = args;
+function createWteWallTexture(
+  wte: Float32Array,
+  dModel: number,
+  highlightRow: number
+): THREE.CanvasTexture {
+  const rows = Math.floor(wte.length / dModel);
+  const h = 256;
+  const w = dModel;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
 
-  switch (beat) {
+  let maxAbs = 1e-5;
+  for (let i = 0; i < wte.length; i++) {
+    const a = Math.abs(wte[i]);
+    if (a > maxAbs) maxAbs = a;
+  }
+
+  for (let py = 0; py < h; py++) {
+    const r = Math.min(rows - 1, Math.floor((py / h) * rows));
+    const isHit = Math.abs(r - highlightRow) <= 1;
+    const base = r * dModel;
+    for (let c = 0; c < w; c++) {
+      ctx.fillStyle = isHit
+        ? '#1d4ed8'
+        : divergingColor((wte[base + c] ?? 0) / maxAbs);
+      ctx.fillRect(c, py, 1, 1);
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
+
+function draw128BarStrip(
+  ctx: Pass2StageContext,
+  vec: number[],
+  zPos: number,
+  maxAbs: number,
+  scaleH: number,
+  stripW = 7.8
+): void {
+  const D = vec.length;
+  const step = stripW / D;
+  const barGeo = ctx.trackGeo(new THREE.BoxGeometry(step * 0.78, 1, 0.22));
+  const rail = new THREE.Mesh(
+    ctx.trackGeo(new THREE.BoxGeometry(stripW + 0.2, 0.04, 0.28)),
+    ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.7 }))
+  );
+  rail.position.set(0, 0, zPos);
+  ctx.stageRoot.add(rail);
+
+  for (let d = 0; d < D; d++) {
+    const v = vec[d];
+    const norm = v / maxAbs;
+    const h = Math.max(0.04, Math.abs(norm) * scaleH);
+    const bar = new THREE.Mesh(
+      barGeo,
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: divergingColor(norm),
+          roughness: 0.32,
+        })
+      )
+    );
+    bar.scale.y = h;
+    bar.position.set(-stripW / 2 + (d + 0.5) * step, v >= 0 ? h / 2 : -h / 2, zPos);
+    ctx.stageRoot.add(bar);
+  }
+}
+
+export function buildChapter123Beat(
+  ctx: Pass2StageContext,
+  snap: Pass2Snapshot
+): boolean {
+  switch (snap.beat) {
     case 'ch1-1-extremes':
-      buildCh1Extremes(args);
+      buildCh1Extremes(ctx, snap);
       return true;
     case 'ch1-2-bpe-merges':
-      buildCh1BpeMerges(args);
+      buildCh1BpeMerges(ctx, snap);
       return true;
     case 'ch1-3-spaces-blindspot':
-      buildCh1SpacesBlindspot(args);
+      buildCh1Spaces(ctx, snap);
       return true;
     case 'ch1-4-token-ids':
-      buildCh1TokenIds(args);
+      buildCh1TokenIds(ctx, snap);
       return true;
     case 'ch1-5-context-window':
-      buildCh1ContextWindow(args);
+      buildCh1ContextWindow(ctx, snap);
       return true;
     case 'ch2-1-wte-lookup':
-      buildCh2WteLookup(args);
+      buildCh2WteLookup(ctx, snap);
       return true;
     case 'ch2-2-pca-cloud':
-      buildCh2PcaCloud(args);
+      buildCh2PcaCloud(ctx, snap);
       return true;
     case 'ch2-3-order-blind':
-      buildCh2OrderBlind(args);
+      buildCh2OrderBlind(ctx);
       return true;
     case 'ch2-4-wpe-add':
-      buildCh2WpeAdd(args);
+      buildCh2WpeAdd(ctx, snap);
       return true;
     case 'ch2-5-rope':
-      buildCh2Rope(args);
+      buildCh2RopeWheel(ctx, snap);
       return true;
     case 'ch3-1-residual-bus':
-      buildCh3ResidualBus(args);
+      buildCh3ResidualBus(ctx, snap, false);
       return true;
     case 'ch3-2-cut-highway':
-      buildCh3CutHighway(args);
+      buildCh3ResidualBus(ctx, snap, true);
       return true;
     case 'ch3-3-layernorm':
-      buildCh3LayerNorm(args);
+      buildCh3LayerNorm(ctx, snap);
       return true;
     case 'ch3-4-rmsnorm':
-      buildCh3RmsNorm(args);
+      buildCh3RmsNorm(ctx, snap);
       return true;
     default:
       return false;
   }
 }
 
-/* -------------------------------------------------------------
- * CHAPTER 1 BUILDERS
- * ----------------------------------------------------------- */
+// CH 1.1: Characters vs. Subwords side-by-side
+function buildCh1Extremes(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const chars = snap.traceRes.prompt.slice(0, 64).split('');
+  const tokens = snap.traceRes.tokens;
+  const span = 8.8;
 
-function buildCh1Extremes({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const tokens = traceRes.tokens;
-  const promptText = tokens.join('');
-  const chars = Array.from(promptText).slice(0, 36);
-
-  // Back row: character-level tiles
-  const charSpacing = 0.52;
-  const charStart = -((chars.length - 1) * charSpacing) / 2;
-  const charLbl = makeLabelSprite(
-    `Extreme 1: Pure Characters (${chars.length} steps — long sequence, high O(T²) cost)`,
-    '#64748b'
+  const charStep = span / Math.max(1, chars.length);
+  const charGeo = ctx.trackGeo(
+    new THREE.BoxGeometry(Math.max(0.06, charStep * 0.72), 0.24, 0.34)
   );
-  charLbl.position.set(0, 1.8, -2.6);
-  charLbl.scale.set(7.5, 0.75, 1);
-  group.add(charLbl);
+  const charMat = ctx.trackMat(
+    new THREE.MeshStandardMaterial({ color: '#94a3b8', roughness: 0.45 })
+  );
 
   for (let i = 0; i < chars.length; i++) {
-    const x = charStart + i * charSpacing;
-    const mesh = makeTileMesh(0.44, 0.44, 0.22, 0xe2e8f0);
-    mesh.position.set(x, 0.6, -2.5);
-    group.add(mesh);
-
-    const lbl = makeLabelSprite(
-      chars[i] === ' ' ? '␣' : chars[i],
-      '#475569',
-      'transparent'
-    );
-    lbl.position.set(x, 1.05, -2.5);
-    lbl.scale.set(0.65, 0.45, 1);
-    group.add(lbl);
+    const m = new THREE.Mesh(charGeo, charMat);
+    m.position.set(-span / 2 + (i + 0.5) * charStep, -0.1, -1.35);
+    ctx.stageRoot.add(m);
   }
-
-  // Front row: subword tokens
-  const tokSpacing = 1.15;
-  const tokStart = -((tokens.length - 1) * tokSpacing) / 2;
-  const tokLbl = makeLabelSprite(
-    `BPE Solution: ${tokens.length} Subwords (Balanced sequence length & finite vocabulary |V|=512)`,
-    '#2563eb'
+  ctx.addLabel(
+    `Character-level: ${chars.length} tiny steps`,
+    'Short dictionary, but very long sequence',
+    [0, 1.05, -1.35],
+    2.9,
+    '#64748b'
   );
-  tokLbl.position.set(0, 1.8, 1.2);
-  tokLbl.scale.set(8.5, 0.85, 1);
-  group.add(tokLbl);
 
+  const tokStep = span / Math.max(1, tokens.length);
+  const tokGeo = ctx.trackGeo(
+    new RoundedBoxGeometry(Math.min(0.68, tokStep * 0.8), 0.42, 0.66, 2, 0.05)
+  );
   for (let i = 0; i < tokens.length; i++) {
-    const x = tokStart + i * tokSpacing;
-    const mesh = makeTileMesh(1.0, 0.55, 0.35, 0xbfdbfe);
-    mesh.position.set(x, 0.6, 1.2);
-    group.add(mesh);
-
-    const lbl = makeLabelSprite(
-      formatToken(tokens[i]),
-      '#1e3a8a',
-      'transparent'
+    const isSel = i === snap.queryIdx;
+    const m = new THREE.Mesh(
+      tokGeo,
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: isSel ? '#d97706' : '#1d4ed8',
+          roughness: 0.3,
+        })
+      )
     );
-    lbl.position.set(x, 1.15, 1.2);
-    lbl.scale.set(1.1, 0.5, 1);
-    group.add(lbl);
-
-    const idLbl = makeLabelSprite(
-      `ID ${traceRes.tokenIds[i]}`,
-      '#64748b',
-      'transparent'
-    );
-    idLbl.position.set(x, 0.05, 1.2);
-    idLbl.scale.set(0.85, 0.35, 1);
-    group.add(idLbl);
+    m.position.set(-span / 2 + (i + 0.5) * tokStep, 0.08, 1.1);
+    m.castShadow = true;
+    m.userData = { kind: 'token', index: i } satisfies ClickTag;
+    ctx.stageRoot.add(m);
+    ctx.interactives.push(m);
   }
+  ctx.addLabel(
+    `BPE Subwords: ${tokens.length} tokens`,
+    `${(chars.length / Math.max(1, tokens.length)).toFixed(2)}× fewer steps to attend over`,
+    [0, 1.25, 1.1],
+    2.9,
+    '#1d4ed8'
+  );
 }
 
-function buildCh1BpeMerges({
-  group,
-  bpeSteps,
-  bpeStepIdx,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const total = bpeSteps.length;
-  const current = bpeSteps[Math.min(bpeStepIdx, total - 1)] ?? bpeSteps[0];
-  const pieces = current.pieces;
+// CH 1.2: Live BPE Merge Step Animator
+function buildCh1BpeMerges(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const steps = snap.bpeSteps;
+  const cur = steps[Math.min(snap.bpeStepIdx, Math.max(0, steps.length - 1))];
+  if (!cur) return;
 
-  const title = makeLabelSprite(
-    `BPE Merge Simulator — Step ${current.step} of ${total - 1}` +
-      (current.mergedResult
-        ? ` (Merged "${current.mergedPair?.[0]}" + "${current.mergedPair?.[1]}" → "${current.mergedResult}", rank #${current.mergeRank})`
-        : ' (Initial Characters)'),
-    '#d97706'
-  );
-  title.position.set(0, 2.4, 0);
-  title.scale.set(9.5, 0.95, 1);
-  group.add(title);
-
-  const spacing = Math.min(1.1, 12 / Math.max(1, pieces.length));
-  const startX = -((pieces.length - 1) * spacing) / 2;
+  const pieces = cur.pieces.slice(0, 64);
+  const totalChars = pieces.reduce((acc, p) => acc + Math.max(1, p.length), 0);
+  const span = 9.0;
+  let cursor = -span / 2;
 
   for (let i = 0; i < pieces.length; i++) {
     const piece = pieces[i];
-    const isNew = current.mergedResult && piece === current.mergedResult;
-    const x = startX + i * spacing;
-
-    const mesh = makeTileMesh(
-      spacing * 0.88,
-      0.65,
-      0.35,
-      isNew ? COLOR_AMBER : 0xecfdf5
+    const width = (Math.max(1, piece.length) / Math.max(1, totalChars)) * span;
+    const isFresh = cur.mergedResult !== null && piece === cur.mergedResult;
+    const mesh = new THREE.Mesh(
+      ctx.trackGeo(
+        new RoundedBoxGeometry(Math.max(0.06, width * 0.86), isFresh ? 0.66 : 0.36, 0.62, 2, 0.04)
+      ),
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: isFresh ? '#d97706' : piece.length > 1 ? '#2563eb' : '#cbd5e1',
+          roughness: 0.3,
+        })
+      )
     );
-    mesh.position.set(x, 0.8, 0);
-    group.add(mesh);
-
-    const lbl = makeLabelSprite(
-      formatToken(piece),
-      isNew ? '#ffffff' : '#065f46',
-      'transparent'
-    );
-    lbl.position.set(x, 1.4, 0);
-    lbl.scale.set(Math.min(1.2, spacing * 1.1), 0.5, 1);
-    group.add(lbl);
-
-    const lenLbl = makeLabelSprite(
-      `${piece.length}B`,
-      '#64748b',
-      'transparent'
-    );
-    lenLbl.position.set(x, 0.2, 0);
-    lenLbl.scale.set(0.65, 0.3, 1);
-    group.add(lenLbl);
+    mesh.position.set(cursor + width / 2, isFresh ? 0.33 : 0.18, 0);
+    mesh.castShadow = true;
+    ctx.stageRoot.add(mesh);
+    cursor += width;
   }
+
+  const subtitle = cur.mergedPair
+    ? `Rule #${cur.mergeRank}: "${formatTokenExplicit(cur.mergedPair[0])}" + "${formatTokenExplicit(cur.mergedPair[1])}" → "${formatTokenExplicit(cur.mergedResult ?? '')}"`
+    : 'Step 0: Raw individual characters (no merges yet)';
+  ctx.addLabel(
+    `Merge Step ${cur.step} / ${Math.max(0, steps.length - 1)} · ${cur.pieces.length} pieces`,
+    subtitle,
+    [0, 1.75, 0],
+    3.4,
+    cur.mergedPair ? '#b45309' : '#1d4ed8'
+  );
 }
 
-function buildCh1SpacesBlindspot({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const tokens = traceRes.tokens;
-  const count = Math.min(tokens.length, 8);
-  const startX = -((count - 1) * 1.6) / 2;
+// CH 1.3: Leading Spaces & Strawberry Blindspot
+function buildCh1Spaces(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const tokens = snap.traceRes.tokens;
+  const totalChars = tokens.reduce((acc, t) => acc + Math.max(1, t.text.length), 0);
+  const span = 9.0;
+  let cursor = -span / 2;
 
-  const header = makeLabelSprite(
-    'Leading-Space Blindspot: " dog" vs. "dog" are distinct vocabulary IDs with distinct weights',
-    '#2563eb'
-  );
-  header.position.set(0, 2.6, 0);
-  header.scale.set(9.8, 0.9, 1);
-  group.add(header);
-
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    const x = startX + i * 1.6;
-    const hasSpace = tok.startsWith(' ') || tok.startsWith(' ');
+    const width = (Math.max(1, tok.text.length) / Math.max(1, totalChars)) * span;
+    const multi = tok.text.length >= 3;
+    const isSel = i === snap.queryIdx;
+    const h = 0.32 + Math.min(1.1, tok.text.length * 0.18);
 
-    const mesh = makeTileMesh(
-      1.35,
-      0.8,
-      0.4,
-      hasSpace ? 0xdbeafe : 0xfef3c7
+    const mesh = new THREE.Mesh(
+      ctx.trackGeo(new RoundedBoxGeometry(Math.max(0.1, width * 0.88), h, 0.68, 2, 0.05)),
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: isSel ? '#1d4ed8' : multi ? '#d97706' : '#64748b',
+          roughness: 0.3,
+        })
+      )
     );
-    mesh.position.set(x, 0.8, 0);
-    group.add(mesh);
+    mesh.position.set(cursor + width / 2, h / 2, 0);
+    mesh.castShadow = true;
+    mesh.userData = { kind: 'token', index: i } satisfies ClickTag;
+    ctx.stageRoot.add(mesh);
+    ctx.interactives.push(mesh);
 
-    const explicit = formatTokenExplicit(tok);
-    const lbl = makeLabelSprite(explicit, hasSpace ? '#1e40af' : '#92400e');
-    lbl.position.set(x, 1.45, 0);
-    lbl.scale.set(1.4, 0.55, 1);
-    group.add(lbl);
-
-    const tag = makeLabelSprite(
-      hasSpace ? 'Space Pre-baked' : 'No Leading Space',
-      hasSpace ? '#2563eb' : '#d97706',
-      'transparent'
-    );
-    tag.position.set(x, 0.15, 0);
-    tag.scale.set(1.2, 0.35, 1);
-    group.add(tag);
+    if (isSel || tokens.length <= 12 || i % 2 === 0) {
+      ctx.addLabel(
+        formatTokenExplicit(tok.text),
+        `${tok.text.length} ch`,
+        [cursor + width / 2, h + 0.48, 0],
+        0.92,
+        isSel ? '#1d4ed8' : multi ? '#b45309' : '#475569'
+      );
+    }
+    cursor += width;
   }
-}
 
-function buildCh1TokenIds({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const { tokens, tokenIds } = traceRes;
-  const count = tokens.length;
-  const spacing = Math.min(1.25, 14 / Math.max(1, count));
-  const startX = -((count - 1) * spacing) / 2;
-
-  const title = makeLabelSprite(
-    `Discrete Token IDs: Categorical barcode addresses into W_e [0 to 511]`,
-    '#059669'
+  ctx.addLabel(
+    'Amber blocks hide multiple letters inside 1 atomic ID',
+    'Leading dots (·) show spaces glued onto tokens',
+    [0, 2.45, -0.4],
+    3.2,
+    '#b45309'
   );
-  title.position.set(0, 2.6, 0);
-  title.scale.set(8.5, 0.85, 1);
-  group.add(title);
-
-  for (let i = 0; i < count; i++) {
-    const x = startX + i * spacing;
-    const id = tokenIds[i];
-
-    // Barcode block
-    const barH = 0.4 + (id / 512) * 1.1;
-    const bar = makeTileMesh(spacing * 0.85, barH, 0.35, COLOR_EMERALD);
-    bar.position.set(x, barH / 2, 0);
-    group.add(bar);
-
-    const tokLbl = makeLabelSprite(
-      formatToken(tokens[i]),
-      '#065f46',
-      'transparent'
-    );
-    tokLbl.position.set(x, barH + 0.4, 0);
-    tokLbl.scale.set(1.1, 0.45, 1);
-    group.add(tokLbl);
-
-    const idLbl = makeLabelSprite(
-      `#${id}`,
-      '#ffffff',
-      'rgba(6,95,70,0.85)'
-    );
-    idLbl.position.set(x, barH / 2, 0.22);
-    idLbl.scale.set(0.75, 0.35, 1);
-    group.add(idLbl);
-  }
 }
 
-function buildCh1ContextWindow({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const maxSlots = 64;
-  const activeCount = traceRes.tokens.length;
+// CH 1.4: Arbitrary Integer IDs
+function buildCh1TokenIds(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const tokens = snap.traceRes.tokens;
+  const T = tokens.length;
+  const span = Math.min(9.0, Math.max(5.0, T * 0.65));
+  const step = span / Math.max(1, T);
+  const geo = ctx.trackGeo(new RoundedBoxGeometry(step * 0.72, 1, 0.56, 2, 0.04));
+
+  for (let i = 0; i < T; i++) {
+    const tok = tokens[i];
+    const h = Math.max(0.14, (tok.id / 511) * 2.5);
+    const isSel = i === snap.queryIdx;
+    const mesh = new THREE.Mesh(
+      geo,
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: isSel ? '#1d4ed8' : '#64748b',
+          roughness: 0.32,
+        })
+      )
+    );
+    const x = -span / 2 + (i + 0.5) * step;
+    mesh.scale.y = h;
+    mesh.position.set(x, h / 2, 0);
+    mesh.castShadow = true;
+    mesh.userData = { kind: 'token', index: i } satisfies ClickTag;
+    ctx.stageRoot.add(mesh);
+    ctx.interactives.push(mesh);
+
+    if (isSel || T <= 10 || i === T - 1) {
+      ctx.addLabel(
+        `#${tok.id}`,
+        formatToken(tok.text),
+        [x, h + 0.48, 0],
+        0.95,
+        isSel ? '#1d4ed8' : '#475569'
+      );
+    }
+  }
+
+  ctx.addLabel(
+    'Raw Vocabulary IDs (0 – 511)',
+    'Jagged & arbitrary — nearby IDs have no shared meaning',
+    [0, 3.05, -0.3],
+    3.1,
+    '#1d4ed8'
+  );
+}
+
+// CH 1.5: Physical 64-Slot Context Desk
+function buildCh1ContextWindow(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const filled = snap.traceRes.tokens.length;
   const cols = 16;
   const rows = 4;
-  const slotW = 0.58;
-  const slotD = 0.58;
+  const spacing = 0.52;
+  const startX = -((cols - 1) * spacing) / 2;
+  const startZ = -((rows - 1) * spacing) / 2;
 
-  const title = makeLabelSprite(
-    `Context Window Capacity: ${activeCount} of 64 slots occupied (${64 - activeCount} free)`,
-    '#2563eb'
+  const tray = new THREE.Mesh(
+    ctx.trackGeo(new RoundedBoxGeometry(cols * spacing + 0.45, 0.14, rows * spacing + 0.45, 2, 0.06)),
+    ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.7 }))
   );
-  title.position.set(0, 2.6, -1.8);
-  title.scale.set(8.8, 0.85, 1);
-  group.add(title);
+  tray.position.set(0, -0.1, 0);
+  tray.receiveShadow = true;
+  ctx.stageRoot.add(tray);
 
-  const startX = -((cols - 1) * slotW) / 2;
-  const startZ = -((rows - 1) * slotD) / 2;
+  const slotGeo = ctx.trackGeo(new RoundedBoxGeometry(0.4, 0.32, 0.4, 2, 0.04));
+  const emptyMat = ctx.trackMat(
+    new THREE.MeshStandardMaterial({
+      color: '#ffffff',
+      roughness: 0.4,
+      transparent: true,
+      opacity: 0.55,
+    })
+  );
 
-  for (let slot = 0; slot < maxSlots; slot++) {
-    const c = slot % cols;
-    const r = Math.floor(slot / cols);
-    const x = startX + c * slotW;
-    const z = startZ + r * slotD;
-    const isActive = slot < activeCount;
-
-    const mesh = makeTileMesh(
-      slotW * 0.82,
-      isActive ? 0.35 : 0.08,
-      slotD * 0.82,
-      isActive ? COLOR_ACCENT : COLOR_GRAY,
-      !isActive
+  for (let i = 0; i < 64; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const isFilled = i < filled;
+    const isSel = i === snap.queryIdx;
+    const mesh = new THREE.Mesh(
+      slotGeo,
+      isFilled
+        ? ctx.trackMat(
+            new THREE.MeshStandardMaterial({
+              color: isSel ? '#d97706' : '#1d4ed8',
+              roughness: 0.3,
+            })
+          )
+        : emptyMat
     );
-    mesh.position.set(x, isActive ? 0.2 : 0.04, z);
-    group.add(mesh);
+    mesh.scale.y = isFilled ? 1 : 0.25;
+    mesh.position.set(
+      startX + c * spacing,
+      isFilled ? 0.16 : 0.04,
+      startZ + r * spacing
+    );
+    if (isFilled) {
+      mesh.castShadow = true;
+      mesh.userData = { kind: 'token', index: i } satisfies ClickTag;
+      ctx.interactives.push(mesh);
+    }
+    ctx.stageRoot.add(mesh);
+  }
 
-    if (isActive) {
-      const lbl = makeLabelSprite(
-        formatToken(traceRes.tokens[slot]),
-        '#ffffff',
-        'transparent'
-      );
-      lbl.position.set(x, 0.55, z);
-      lbl.scale.set(0.65, 0.3, 1);
-      group.add(lbl);
+  const rawTotal =
+    snap.bpeSteps.length > 0
+      ? snap.bpeSteps[snap.bpeSteps.length - 1].pieces.length
+      : filled;
+  const overflow = Math.max(0, rawTotal - 64);
+
+  if (overflow > 0) {
+    const dropMat = ctx.trackMat(
+      new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.4 })
+    );
+    for (let j = 0; j < Math.min(overflow, 8); j++) {
+      const m = new THREE.Mesh(slotGeo, dropMat);
+      m.position.set(4.9 + (j % 2) * 0.46, -0.45 - j * 0.06, -0.4 + Math.floor(j / 2) * 0.48);
+      m.rotation.set(0.3 * j, 0.4, 0.25 * j);
+      ctx.stageRoot.add(m);
     }
   }
+
+  ctx.addLabel(
+    `Context Window: ${filled} / 64 slots used`,
+    overflow > 0
+      ? `${overflow} overflow tokens fell off the desk!`
+      : `${64 - filled} open slots remaining on desk`,
+    [0, 1.65, -1.2],
+    3.1,
+    overflow > 0 ? '#dc2626' : '#1d4ed8'
+  );
 }
 
-/* -------------------------------------------------------------
- * CHAPTER 2 BUILDERS
- * ----------------------------------------------------------- */
+// CH 2.1: wte [512, 128] Coordinate Wall + Selected 128-dim Vector
+function buildCh2WteLookup(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const tok = snap.traceRes.tokens[snap.queryIdx];
+  const vec = snap.traceRes.trace.tokEmb[snap.queryIdx];
+  const dModel = vec.length;
 
-function buildCh2WteLookup({
-  group,
-  traceRes,
-  wteWeights,
-  queryIdx,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    'Embedding Wall W_e [512 × 128]: Direct row lookup copies 128 float values into the residual stream',
-    '#2563eb'
-  );
-  title.position.set(0, 2.8, -1.5);
-  title.scale.set(9.8, 0.9, 1);
-  group.add(title);
-
-  // Background wall mesh (512x128 plate representation)
-  const wallGeom = new THREE.PlaneGeometry(8.5, 4.2);
-  const wallMat = new THREE.MeshBasicMaterial({
-    color: 0x0f172a,
-    side: THREE.DoubleSide,
-  });
-  const wall = new THREE.Mesh(wallGeom, wallMat);
-  wall.position.set(0, 1.2, -2.0);
-  group.add(wall);
-
-  const wallWire = new THREE.LineSegments(
-    new THREE.WireframeGeometry(wallGeom),
-    new THREE.LineBasicMaterial({ color: 0x334155 })
-  );
-  wallWire.position.copy(wall.position);
-  group.add(wallWire);
-
-  // Active extracted row tiles in foreground
-  const safeIdx = Math.min(queryIdx, traceRes.tokens.length - 1);
-  const activeId = traceRes.tokenIds[safeIdx];
-  const activeToken = traceRes.tokens[safeIdx];
-
-  const rowMesh = makeTileMesh(7.2, 0.55, 0.35, COLOR_ACCENT);
-  rowMesh.position.set(0, 0.8, 0.8);
-  group.add(rowMesh);
-
-  const rowLbl = makeLabelSprite(
-    `Extracted Row #${activeId} for token "${formatToken(activeToken)}" → 128 Float Coordinates`,
-    '#ffffff',
-    '#1e3a8a'
-  );
-  rowLbl.position.set(0, 1.35, 0.8);
-  rowLbl.scale.set(6.8, 0.65, 1);
-  group.add(rowLbl);
-
-  if (wteWeights) {
-    const previewCount = 16;
-    const startX = -((previewCount - 1) * 0.42) / 2;
-    const base = activeId * 128;
-    for (let d = 0; d < previewCount; d++) {
-      const val = wteWeights[base + d] ?? 0;
-      const x = startX + d * 0.42;
-      const h = Math.max(0.08, Math.min(1.4, Math.abs(val) * 4.5));
-      const col = val >= 0 ? COLOR_EMERALD : COLOR_ROSE;
-      const bar = makeTileMesh(0.32, h, 0.22, col);
-      bar.position.set(x, 0.2 + h / 2, 1.6);
-      group.add(bar);
-    }
-
-    const previewLbl = makeLabelSprite(
-      'First 16 of 128 embedding dimensions (green = +, pink = −)',
-      '#64748b'
+  // Left: Tall 512x128 wte matrix wall
+  if (snap.wteWeights) {
+    const tex = ctx.trackTex(createWteWallTexture(snap.wteWeights, dModel, tok.id));
+    const wall = new THREE.Mesh(
+      ctx.trackGeo(new RoundedBoxGeometry(2.4, 3.2, 0.2, 2, 0.04)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ map: tex, roughness: 0.35 }))
     );
-    previewLbl.position.set(0, -0.2, 1.6);
-    previewLbl.scale.set(5.5, 0.45, 1);
-    group.add(previewLbl);
+    wall.position.set(-3.4, 0.45, 0);
+    wall.castShadow = true;
+    ctx.stageRoot.add(wall);
   }
+  ctx.addLabel('wte [512 × 128]', `Row #${tok.id} highlighted`, [-3.4, 2.45, 0], 1.9);
+
+  // Right: Extracted 128-dim bar vector
+  let maxAbs = 1e-5;
+  for (const v of vec) maxAbs = Math.max(maxAbs, Math.abs(v));
+
+  const stripW = 4.6;
+  const step = stripW / dModel;
+  const barGeo = ctx.trackGeo(new THREE.BoxGeometry(step * 0.78, 1, 0.26));
+  const originX = -0.7;
+
+  const rail = new THREE.Mesh(
+    ctx.trackGeo(new THREE.BoxGeometry(stripW + 0.16, 0.05, 0.32)),
+    ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.7 }))
+  );
+  rail.position.set(originX + stripW / 2, 0.25, 0);
+  ctx.stageRoot.add(rail);
+
+  for (let d = 0; d < dModel; d++) {
+    const norm = vec[d] / maxAbs;
+    const h = Math.max(0.04, Math.abs(norm) * 1.35);
+    const bar = new THREE.Mesh(
+      barGeo,
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: divergingColor(norm),
+          roughness: 0.3,
+        })
+      )
+    );
+    bar.scale.y = h;
+    bar.position.set(
+      originX + (d + 0.5) * step,
+      0.25 + (vec[d] >= 0 ? h / 2 : -h / 2),
+      0
+    );
+    ctx.stageRoot.add(bar);
+  }
+
+  ctx.addLabel(
+    `“${formatToken(tok.text)}” → 128 floats`,
+    `||wte[#${tok.id}]|| = ${formatNum(vectorL2Norm(vec), 3)}`,
+    [originX + stripW / 2, 2.15, 0],
+    2.4,
+    '#0f766e'
+  );
 }
 
-function buildCh2PcaCloud({
-  group,
-  pcaCloud,
-  traceRes,
-  queryIdx,
-  wteWeights,
-  tokenizer,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    '3D PCA Space: 512 Vocabulary Embeddings Projected onto Top 3 Principal Components',
-    '#2563eb'
-  );
-  title.position.set(0, 3.2, 0);
-  title.scale.set(9.5, 0.9, 1);
-  group.add(title);
-
-  if (!pcaCloud || pcaCloud.points.length === 0) {
-    const loadingLbl = makeLabelSprite(
-      'Computing 3D PCA projection on trained wte...',
-      '#64748b'
-    );
-    loadingLbl.position.set(0, 1.5, 0);
-    loadingLbl.scale.set(5, 0.6, 1);
-    group.add(loadingLbl);
+// CH 2.2: Real 3D PCA Embedding Cloud (512 real tokens + top-5 128D cosine neighbors)
+function buildCh2PcaCloud(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const cloud = snap.pcaCloud;
+  if (!cloud || !snap.wteWeights) {
+    ctx.addLabel('Computing 3D PCA...', 'From real wte.weight [512 × 128]', [0, 0.5, 0], 2.5);
     return;
   }
 
-  const safeIdx = Math.min(queryIdx, traceRes.tokens.length - 1);
-  const activeId = traceRes.tokenIds[safeIdx];
+  const tok = snap.traceRes.tokens[snap.queryIdx];
+  const dModel = snap.traceRes.trace.tokEmb[0].length;
+  const neighbors = findCosineNeighbors(
+    snap.wteWeights,
+    snap.tokenizer.vocab,
+    dModel,
+    tok.id,
+    5
+  );
+  const neighborMap = new Map(neighbors.map((n) => [n.id, n]));
+  const promptIdSet = new Set(snap.traceRes.tokens.map((t) => t.id));
 
-  // Point cloud geometry
-  const pts = pcaCloud.points;
-  const geom = new THREE.BufferGeometry();
-  const positions = new Float32Array(pts.length * 3);
-  const colors = new Float32Array(pts.length * 3);
+  // Subtle 3D reference axes
+  const axisMat = ctx.trackMat(
+    new THREE.LineBasicMaterial({ color: '#cbd5e1', transparent: true, opacity: 0.7 })
+  );
+  const makeAxis = (a: [number, number, number], b: [number, number, number]) => {
+    const g = ctx.trackGeo(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(...a),
+        new THREE.Vector3(...b),
+      ])
+    );
+    ctx.stageRoot.add(new THREE.Line(g, axisMat));
+  };
+  makeAxis([-3.5, 0, 0], [3.5, 0, 0]);
+  makeAxis([0, -2.5, 0], [0, 2.5, 0]);
+  makeAxis([0, 0, -3.5], [0, 0, 3.5]);
 
-  const activeColor = new THREE.Color(0xf59e0b);
-  const normalColor = new THREE.Color(0x38bdf8);
+  // Instanced background constellation of all 512 real vocabulary tokens
+  const pts = cloud.points;
+  const bgGeo = ctx.trackGeo(new THREE.SphereGeometry(0.065, 10, 10));
+  const bgMat = ctx.trackMat(
+    new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
+  );
+  const inst = new THREE.InstancedMesh(bgGeo, bgMat, pts.length);
+  const dummy = new THREE.Object3D();
+  const cMuted = new THREE.Color('#94a3b8');
+  const cPrompt = new THREE.Color('#60a5fa');
+  const cTarget = new THREE.Color('#1d4ed8');
+  const cNeighbor = new THREE.Color('#d97706');
 
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
-    positions[i * 3 + 0] = p.x;
-    positions[i * 3 + 1] = p.y + 1.2;
-    positions[i * 3 + 2] = p.z;
-
-    const c = p.id === activeId ? activeColor : normalColor;
-    colors[i * 3 + 0] = c.r;
-    colors[i * 3 + 1] = c.g;
-    colors[i * 3 + 2] = c.b;
+    const isTarget = p.id === tok.id;
+    const isNeighbor = neighborMap.has(p.id);
+    const isPrompt = promptIdSet.has(p.id);
+    dummy.position.set(p.x, p.y * 0.75 + 0.3, p.z);
+    dummy.scale.setScalar(isTarget ? 2.8 : isNeighbor ? 2.1 : isPrompt ? 1.45 : 0.9);
+    dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+    inst.setColorAt(
+      i,
+      isTarget ? cTarget : isNeighbor ? cNeighbor : isPrompt ? cPrompt : cMuted
+    );
   }
+  inst.instanceMatrix.needsUpdate = true;
+  if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+  ctx.stageRoot.add(inst);
 
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-  const mat = new THREE.PointsMaterial({
-    size: 0.18,
-    vertexColors: true,
-  });
-  const cloud = new THREE.Points(geom, mat);
-  group.add(cloud);
-
-  // Highlight active token with an orb and label
-  const activePt = pts[activeId];
-  if (activePt) {
-    const orb = new THREE.Mesh(
-      new THREE.SphereGeometry(0.24, 16, 16),
-      new THREE.MeshStandardMaterial({
-        color: COLOR_AMBER,
-        emissive: 0xd97706,
-        emissiveIntensity: 0.5,
-      })
+  // Connect target token to its top-5 128D cosine similarity neighbors
+  const tp = pts[tok.id];
+  if (tp) {
+    const tPos = new THREE.Vector3(tp.x, tp.y * 0.75 + 0.3, tp.z);
+    ctx.addLabel(
+      `“${formatToken(tp.text)}”`,
+      'Selected token',
+      [tPos.x, tPos.y + 0.42, tPos.z],
+      1.35,
+      '#1d4ed8'
     );
-    orb.position.set(activePt.x, activePt.y + 1.2, activePt.z);
-    group.add(orb);
 
-    const activeLbl = makeLabelSprite(
-      `Active: "${formatToken(activePt.text)}" (#${activeId})`,
-      '#ffffff',
-      '#d97706'
+    const lineMat = ctx.trackMat(
+      new THREE.LineBasicMaterial({ color: '#d97706', transparent: true, opacity: 0.85 })
     );
-    activeLbl.position.set(activePt.x, activePt.y + 1.7, activePt.z);
-    activeLbl.scale.set(2.4, 0.55, 1);
-    group.add(activeLbl);
-
-    // Show cosine neighbor lines if weights are ready
-    if (wteWeights) {
-      const neighbors = findCosineNeighbors(
-        wteWeights,
-        tokenizer.vocab,
-        128,
-        activeId,
-        4
+    for (const nb of neighbors) {
+      const np = pts[nb.id];
+      if (!np) continue;
+      const nPos = new THREE.Vector3(np.x, np.y * 0.75 + 0.3, np.z);
+      const lGeo = ctx.trackGeo(new THREE.BufferGeometry().setFromPoints([tPos, nPos]));
+      ctx.stageRoot.add(new THREE.Line(lGeo, lineMat));
+      ctx.addLabel(
+        `“${formatToken(np.text)}”`,
+        `cos ${nb.cosine.toFixed(2)}`,
+        [nPos.x, nPos.y + 0.34, nPos.z],
+        1.05,
+        '#b45309'
       );
-      for (const n of neighbors) {
-        const targetPt = pts[n.id];
-        if (!targetPt) continue;
-        const lineGeom = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(activePt.x, activePt.y + 1.2, activePt.z),
-          new THREE.Vector3(targetPt.x, targetPt.y + 1.2, targetPt.z),
-        ]);
-        const line = new THREE.Line(
-          lineGeom,
-          new THREE.LineBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.75 })
-        );
-        group.add(line);
-
-        const nLbl = makeLabelSprite(
-          `${formatToken(n.text)} (cos ${formatNum(n.cosine, 2)})`,
-          '#10b981',
-          'rgba(6,95,70,0.85)'
-        );
-        nLbl.position.set(targetPt.x, targetPt.y + 1.5, targetPt.z);
-        nLbl.scale.set(1.8, 0.45, 1);
-        group.add(nLbl);
-      }
     }
   }
 }
 
-function buildCh2OrderBlind({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const tokens = traceRes.tokens;
-  const count = Math.min(tokens.length, 10);
-  const title = makeLabelSprite(
-    'Order-Blind Bag of Words: Without position coordinates, "Max bit dog" == "Dog bit Max"',
-    '#dc2626'
-  );
-  title.position.set(0, 2.8, 0);
-  title.scale.set(9.5, 0.9, 1);
-  group.add(title);
+// CH 2.3: Order-Blind Bag of Vectors
+function buildCh2OrderBlind(ctx: Pass2StageContext): void {
+  const rowA = ['The', 'dog', 'chased', 'the', 'ball'];
+  const rowB = ['The', 'ball', 'chased', 'the', 'dog'];
+  const colors: Record<string, string> = {
+    The: '#64748b',
+    dog: '#d97706',
+    chased: '#3b82f6',
+    the: '#64748b',
+    ball: '#0f766e',
+  };
+  const geo = ctx.trackGeo(new RoundedBoxGeometry(1.1, 0.56, 0.65, 2, 0.06));
 
-  // Scrambled cloud positions in circle
+  const placeRow = (words: string[], z: number, title: string) => {
+    words.forEach((w, i) => {
+      const x = -3.0 + i * 1.5;
+      const mesh = new THREE.Mesh(
+        geo,
+        ctx.trackMat(
+          new THREE.MeshStandardMaterial({
+            color: colors[w] ?? '#64748b',
+            roughness: 0.3,
+          })
+        )
+      );
+      mesh.position.set(x, 0.15, z);
+      mesh.castShadow = true;
+      ctx.stageRoot.add(mesh);
+      ctx.addLabel(w, undefined, [x, 0.82, z], 0.95, colors[w] ?? '#334155');
+    });
+    ctx.addLabel(title, undefined, [0, 1.55, z], 2.2, '#334155');
+  };
+
+  placeRow(rowA, -1.35, 'Sentence A: identical 5 vectors');
+  placeRow(rowB, 1.35, 'Sentence B: exact same set, swapped order!');
+}
+
+// CH 2.4: wte + wpe = h0 Tensor Slabs
+function buildCh2WpeAdd(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const { tokEmb, posEmb } = snap.traceRes.trace;
+  const T = tokEmb.length;
+  const h0 = tokEmb.map((row, r) => row.map((v, c) => v + posEmb[r][c]));
+
+  const addPlate = (mat: number[][], x: number, frameHex: string) => {
+    const tex = ctx.trackTex(createTensorTexture(mat, 'diverging', false));
+    const side = ctx.trackMat(
+      new THREE.MeshStandardMaterial({ color: frameHex, roughness: 0.45 })
+    );
+    const face = ctx.trackMat(
+      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.3 })
+    );
+    const mesh = new THREE.Mesh(
+      ctx.trackGeo(new RoundedBoxGeometry(2.55, 2.0, 0.22, 2, 0.04)),
+      [side, side, face, side, face, face]
+    );
+    mesh.position.set(x, 0.35, 0);
+    mesh.castShadow = true;
+    ctx.stageRoot.add(mesh);
+  };
+
+  addPlate(tokEmb, -3.3, '#cbd5e1');
+  ctx.addLabel('Token Meaning (wte)', `[${T} × 128]`, [-3.3, 1.85, 0], 1.95, '#1d4ed8');
+
+  const plus = new THREE.Mesh(
+    ctx.trackGeo(new THREE.SphereGeometry(0.2, 20, 20)),
+    ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#c89b54', metalness: 0.65, roughness: 0.25 }))
+  );
+  plus.position.set(-1.65, 0.35, 0);
+  ctx.stageRoot.add(plus);
+  ctx.addLabel('+', undefined, [-1.65, 0.95, 0], 0.7, '#b45309');
+
+  addPlate(posEmb, 0, '#fed7aa');
+  ctx.addLabel('Slot Position (wpe)', `[${T} × 128]`, [0, 1.85, 0], 1.95, '#b45309');
+
+  const eq = plus.clone();
+  eq.position.set(1.65, 0.35, 0);
+  ctx.stageRoot.add(eq);
+  ctx.addLabel('=', undefined, [1.65, 0.95, 0], 0.7, '#0f766e');
+
+  addPlate(h0, 3.3, '#93c5fd');
+  ctx.addLabel('Starting Stream h₀', `wte + wpe [${T} × 128]`, [3.3, 1.85, 0], 2.05, '#0f766e');
+}
+
+// CH 2.5: Interactive 2D RoPE Rotation Clock Wheel
+function buildCh2RopeWheel(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
   const radius = 2.4;
-  for (let i = 0; i < count; i++) {
-    const angle = (i / count) * Math.PI * 2 + 0.3;
-    const x = Math.cos(angle) * radius;
-    const z = Math.sin(angle) * radius;
-    const y = 0.5 + Math.sin(i * 1.7) * 0.4;
+  const angleStep = Math.PI / 10; // 18 deg per slot
+  const angA = snap.ropeSlotA * angleStep;
+  const angB = snap.ropeSlotB * angleStep;
+  const deltaSlots = snap.ropeSlotB - snap.ropeSlotA;
+  const deltaDeg = Math.round((deltaSlots * 180) / 10);
 
-    const mesh = makeTileMesh(1.1, 0.5, 0.35, 0xfecaca);
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-
-    const lbl = makeLabelSprite(
-      formatToken(tokens[i]),
-      '#991b1b',
-      'transparent'
-    );
-    lbl.position.set(x, y + 0.5, z);
-    lbl.scale.set(1.1, 0.45, 1);
-    group.add(lbl);
-
-    const qMark = makeLabelSprite('Position ?', '#dc2626');
-    qMark.position.set(x, y - 0.4, z);
-    qMark.scale.set(0.95, 0.35, 1);
-    group.add(qMark);
-  }
-}
-
-function buildCh2WpeAdd({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const tokens = traceRes.tokens;
-  const count = Math.min(tokens.length, 6);
-  const spacing = 1.6;
-  const startX = -((count - 1) * spacing) / 2;
-
-  const title = makeLabelSprite(
-    'Absolute Position Addition: h_t = wte[token] + wpe[slot]',
-    '#059669'
+  // Clock ring
+  const ring = new THREE.Mesh(
+    ctx.trackGeo(new THREE.TorusGeometry(radius, 0.06, 16, 64)),
+    ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.4 }))
   );
-  title.position.set(0, 2.8, 0);
-  title.scale.set(8.5, 0.85, 1);
-  group.add(title);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.05;
+  ctx.stageRoot.add(ring);
 
-  for (let i = 0; i < count; i++) {
-    const x = startX + i * spacing;
-
-    // Token plate (wte)
-    const wteMesh = makeTileMesh(1.2, 0.45, 0.3, 0xbfdbfe);
-    wteMesh.position.set(x, 1.6, 0);
-    group.add(wteMesh);
-
-    const wteLbl = makeLabelSprite(
-      `wte: "${formatToken(tokens[i])}"`,
-      '#1e40af',
-      'transparent'
-    );
-    wteLbl.position.set(x, 2.0, 0);
-    wteLbl.scale.set(1.3, 0.4, 1);
-    group.add(wteLbl);
-
-    // Plus sign
-    const plusLbl = makeLabelSprite('+', '#64748b', 'transparent');
-    plusLbl.position.set(x, 1.15, 0);
-    plusLbl.scale.set(0.5, 0.4, 1);
-    group.add(plusLbl);
-
-    // Position plate (wpe)
-    const wpeMesh = makeTileMesh(1.2, 0.45, 0.3, 0xfef08a);
-    wpeMesh.position.set(x, 0.7, 0);
-    group.add(wpeMesh);
-
-    const wpeLbl = makeLabelSprite(
-      `wpe: slot ${i}`,
-      '#854d0e',
-      'transparent'
-    );
-    wpeLbl.position.set(x, 0.25, 0);
-    wpeLbl.scale.set(1.2, 0.35, 1);
-    group.add(wpeLbl);
-  }
-}
-
-function buildCh2Rope({
-  group,
-  ropeSlotA,
-  ropeSlotB,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    `RoPE Clock Wheels: Relative Angle Delta theta = (Slot ${ropeSlotB} - Slot ${ropeSlotA}) * omega`,
-    '#2563eb'
-  );
-  title.position.set(0, 2.8, 0);
-  title.scale.set(9.5, 0.85, 1);
-  group.add(title);
-
-  // Two clock faces side by side
-  const baseFreq = 0.35;
-  const angleA = ropeSlotA * baseFreq;
-  const angleB = ropeSlotB * baseFreq;
-
-  const clocks = [
-    { name: `Slot A (${ropeSlotA})`, x: -2.2, angle: angleA, col: 0x2563eb },
-    { name: `Slot B (${ropeSlotB})`, x: 2.2, angle: angleB, col: 0x059669 },
-  ];
-
-  for (const c of clocks) {
-    // Clock face
-    const face = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.4, 1.4, 0.1, 32),
-      new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.3 })
-    );
-    face.rotation.x = Math.PI / 2;
-    face.position.set(c.x, 1.1, 0);
-    group.add(face);
-
-    // Hand
-    const handGeom = new THREE.BoxGeometry(0.12, 1.1, 0.14);
-    const handMat = new THREE.MeshStandardMaterial({ color: c.col });
-    const hand = new THREE.Mesh(handGeom, handMat);
-    hand.position.set(c.x, 1.1, 0.15);
-    hand.rotation.z = -c.angle;
-    group.add(hand);
-
-    const lbl = makeLabelSprite(c.name, '#ffffff', '#0f172a');
-    lbl.position.set(c.x, -0.4, 0);
-    lbl.scale.set(1.8, 0.5, 1);
-    group.add(lbl);
+  // Tick marks
+  const tickGeo = ctx.trackGeo(new THREE.BoxGeometry(0.05, 0.06, 0.22));
+  const tickMat = ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#94a3b8' }));
+  for (let i = 0; i < 20; i++) {
+    const a = i * angleStep;
+    const tick = new THREE.Mesh(tickGeo, tickMat);
+    tick.position.set(Math.cos(a) * radius, 0.06, Math.sin(a) * radius);
+    tick.rotation.y = -a + Math.PI / 2;
+    ctx.stageRoot.add(tick);
   }
 
-  // Delta angle badge in center
-  const deltaSlots = ropeSlotB - ropeSlotA;
-  const deltaDeg = Math.round((Math.abs(angleB - angleA) * 180) / Math.PI);
-  const deltaBadge = makeLabelSprite(
-    `Delta = ${deltaSlots} slots (Angle difference = ${deltaDeg}°)`,
-    '#d97706',
-    '#fef3c7'
-  );
-  deltaBadge.position.set(0, 1.1, 0);
-  deltaBadge.scale.set(3.8, 0.65, 1);
-  group.add(deltaBadge);
-}
-
-/* -------------------------------------------------------------
- * CHAPTER 3 BUILDERS
- * ----------------------------------------------------------- */
-
-function buildCh3ResidualBus({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    'The Residual Highway: h_(l+1) = h_l + Attention(LN(h_l)) + MLP(LN(h_l))',
-    '#d97706'
-  );
-  title.position.set(0, 3.2, 0);
-  title.scale.set(9.5, 0.9, 1);
-  group.add(title);
-
-  // Central highway bar
-  const highwayGeom = new THREE.BoxGeometry(10.5, 0.45, 0.55);
-  const highwayMat = new THREE.MeshStandardMaterial({
-    color: 0xf59e0b,
-    metalness: 0.3,
-    roughness: 0.2,
-  });
-  const highway = new THREE.Mesh(highwayGeom, highwayMat);
-  highway.position.set(0, 1.2, 0);
-  group.add(highway);
-
-  const hwLbl = makeLabelSprite('Central Residual Bus h [128]', '#ffffff', '#b45309');
-  hwLbl.position.set(0, 1.75, 0);
-  hwLbl.scale.set(3.4, 0.55, 1);
-  group.add(hwLbl);
-
-  // 4 layer branch loops off to the side
-  const layerSpacing = 2.2;
-  const startX = -((4 - 1) * layerSpacing) / 2;
-
-  for (let l = 0; l < 4; l++) {
-    const x = startX + l * layerSpacing;
-
-    // Attention loop above
-    const attnMesh = makeTileMesh(1.4, 0.5, 0.3, 0x2563eb);
-    attnMesh.position.set(x, 2.4, 0);
-    group.add(attnMesh);
-
-    const attnLbl = makeLabelSprite(`Attn L${l}`, '#ffffff', 'transparent');
-    attnLbl.position.set(x, 2.8, 0);
-    attnLbl.scale.set(1.1, 0.35, 1);
-    group.add(attnLbl);
-
-    // MLP loop below
-    const mlpMesh = makeTileMesh(1.4, 0.5, 0.3, 0x10b981);
-    mlpMesh.position.set(x, 0.0, 0);
-    group.add(mlpMesh);
-
-    const mlpLbl = makeLabelSprite(`MLP L${l}`, '#ffffff', 'transparent');
-    mlpLbl.position.set(x, -0.4, 0);
-    mlpLbl.scale.set(1.1, 0.35, 1);
-    group.add(mlpLbl);
-
-    // Connecting branch lines
-    const lineGeom = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(x, 0.25, 0),
-      new THREE.Vector3(x, 2.15, 0),
-    ]);
-    const line = new THREE.Line(
-      lineGeom,
-      new THREE.LineBasicMaterial({ color: 0x94a3b8 })
+  // Draw rotated Q and K arrows
+  const drawArrow = (ang: number, colorHex: string, label: string, sub: string) => {
+    const dir = new THREE.Vector3(Math.cos(ang), 0, Math.sin(ang));
+    const shaft = new THREE.Mesh(
+      ctx.trackGeo(new THREE.CylinderGeometry(0.06, 0.06, radius * 0.88, 16)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.25 }))
     );
-    group.add(line);
+    shaft.rotation.z = -Math.PI / 2;
+    shaft.rotation.y = -ang;
+    shaft.position.set(dir.x * radius * 0.44, 0.2, dir.z * radius * 0.44);
+    ctx.stageRoot.add(shaft);
+
+    const tip = new THREE.Mesh(
+      ctx.trackGeo(new THREE.ConeGeometry(0.16, 0.36, 16)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.25 }))
+    );
+    tip.rotation.z = -Math.PI / 2;
+    tip.rotation.y = -ang;
+    tip.position.set(dir.x * radius * 0.92, 0.2, dir.z * radius * 0.92);
+    ctx.stageRoot.add(tip);
+
+    ctx.addLabel(label, sub, [dir.x * (radius + 0.65), 0.72, dir.z * (radius + 0.65)], 1.45, colorHex);
+  };
+
+  drawArrow(angA, '#1d4ed8', `Slot A = ${snap.ropeSlotA}`, `${snap.ropeSlotA * 18}°`);
+  drawArrow(angB, '#d97706', `Slot B = ${snap.ropeSlotB}`, `${snap.ropeSlotB * 18}°`);
+
+  // Arc connecting angA to angB
+  const arcPts: THREE.Vector3[] = [];
+  const steps = 24;
+  for (let i = 0; i <= steps; i++) {
+    const a = angA + ((angB - angA) * i) / steps;
+    arcPts.push(new THREE.Vector3(Math.cos(a) * 1.15, 0.2, Math.sin(a) * 1.15));
   }
+  if (arcPts.length >= 2) {
+    const arcCurve = new THREE.CatmullRomCurve3(arcPts);
+    const arcTube = new THREE.Mesh(
+      ctx.trackGeo(new THREE.TubeGeometry(arcCurve, 24, 0.04, 8, false)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#0f766e', roughness: 0.3 }))
+    );
+    ctx.stageRoot.add(arcTube);
+  }
+
+  ctx.addLabel(
+    `Relative Distance Δ = ${deltaSlots} slots`,
+    `Angle between arrows = ${deltaDeg}° · cos(Δθ) = ${Math.cos(angB - angA).toFixed(2)}`,
+    [0, 1.85, 0],
+    2.9,
+    '#0f766e'
+  );
 }
 
-function buildCh3CutHighway({
-  group,
-  ablation,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const isCut = (ablation.disabledResiduals?.length ?? 0) > 0;
+// CH 3.1 & 3.2: Residual Highway + Break-It Counterfactual Skyline
+function buildCh3ResidualBus(
+  ctx: Pass2StageContext,
+  snap: Pass2Snapshot,
+  showBreakIt: boolean
+): void {
+  const cut = hasResidualAblation(snap.ablation);
+  const { trace } = snap.traceRes;
+  const last = snap.traceRes.tokens.length - 1;
+  const blockX = [-3.3, -1.5, 0.3, 2.1];
 
-  const title = makeLabelSprite(
-    isCut
-      ? 'CUT RESIDUAL HIGHWAY: Signals severed! Output predictions collapsing into gibberish'
-      : 'Intact Residual Highway: Toggle "Cut Residuals" button to witness catastrophic failure',
-    isCut ? '#dc2626' : '#059669'
-  );
-  title.position.set(0, 3.2, 0);
-  title.scale.set(9.8, 0.9, 1);
-  group.add(title);
-
-  // Highway with fracture
-  const leftGeom = new THREE.BoxGeometry(4.2, 0.45, 0.55);
-  const rightGeom = new THREE.BoxGeometry(4.2, 0.45, 0.55);
-  const mat = new THREE.MeshStandardMaterial({
-    color: isCut ? COLOR_DANGER : 0xf59e0b,
-  });
-
-  const leftBar = new THREE.Mesh(leftGeom, mat);
-  leftBar.position.set(-2.8, 1.2, 0);
-  group.add(leftBar);
-
-  const rightBar = new THREE.Mesh(rightGeom, mat);
-  rightBar.position.set(2.8, 1.2, 0);
-  group.add(rightBar);
-
-  if (isCut) {
-    const cutSign = makeLabelSprite('RESIDUAL SEVERED', '#ffffff', '#dc2626');
-    cutSign.position.set(0, 1.2, 0);
-    cutSign.scale.set(3.2, 0.75, 1);
-    group.add(cutSign);
+  // Unbroken vs Fractured Residual Stream Highway
+  if (!cut) {
+    const bus = new THREE.Mesh(
+      ctx.trackGeo(new RoundedBoxGeometry(7.6, 0.22, 0.66, 2, 0.05)),
+      ctx.trackMat(
+        new THREE.MeshPhysicalMaterial({
+          color: '#1d4ed8',
+          emissive: '#1d4ed8',
+          emissiveIntensity: 0.25,
+          roughness: 0.22,
+        })
+      )
+    );
+    bus.position.set(-0.6, -0.55, 0);
+    ctx.stageRoot.add(bus);
   } else {
-    const bridge = new THREE.Mesh(
-      new THREE.BoxGeometry(1.6, 0.45, 0.55),
-      mat
+    // Broken dashed segments when skip connections are cut
+    const brokenMat = ctx.trackMat(
+      new THREE.MeshStandardMaterial({
+        color: '#dc2626',
+        roughness: 0.5,
+        transparent: true,
+        opacity: 0.65,
+      })
     );
-    bridge.position.set(0, 1.2, 0);
-    group.add(bridge);
+    for (let s = 0; s < 5; s++) {
+      const seg = new THREE.Mesh(
+        ctx.trackGeo(new RoundedBoxGeometry(0.75, 0.14, 0.52, 2, 0.04)),
+        brokenMat
+      );
+      seg.position.set(-3.8 + s * 1.65, -0.55, 0);
+      ctx.stageRoot.add(seg);
+    }
+  }
+
+  // 4 Blocks writing additive deltas onto the highway
+  for (let l = 0; l < 4; l++) {
+    const x = blockX[l];
+    const lt = trace.layers[l];
+    const attnMag = !lt.skipped ? vectorL2Norm(lt.attn.output[last]) : 0.2;
+    const mlpMag = !lt.skipped ? vectorL2Norm(lt.mlp.output[last]) : 0.2;
+
+    const frame = new THREE.Mesh(
+      ctx.trackGeo(new RoundedBoxGeometry(1.42, 1.7, 1.3, 2, 0.08)),
+      ctx.trackMat(
+        new THREE.MeshPhysicalMaterial({
+          color: cut ? '#ffedd5' : '#ffffff',
+          roughness: 0.25,
+          transmission: 0.65,
+          transparent: true,
+          opacity: 0.82,
+        })
+      )
+    );
+    frame.position.set(x, 0.72, 0);
+    ctx.stageRoot.add(frame);
+
+    const pAttn = new THREE.Mesh(
+      ctx.trackGeo(new THREE.BoxGeometry(0.32, Math.min(1.3, 0.25 + attnMag * 0.1), 0.36)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#2563eb', roughness: 0.3 }))
+    );
+    pAttn.position.set(x - 0.28, 0.55, 0);
+    ctx.stageRoot.add(pAttn);
+
+    const pMlp = new THREE.Mesh(
+      ctx.trackGeo(new THREE.BoxGeometry(0.32, Math.min(1.3, 0.25 + mlpMag * 0.1), 0.36)),
+      ctx.trackMat(new THREE.MeshStandardMaterial({ color: '#d97706', roughness: 0.3 }))
+    );
+    pMlp.position.set(x + 0.28, 0.55, 0);
+    ctx.stageRoot.add(pMlp);
+
+    const plus = new THREE.Mesh(
+      ctx.trackGeo(new THREE.SphereGeometry(0.14, 16, 16)),
+      ctx.trackMat(
+        new THREE.MeshStandardMaterial({
+          color: cut ? '#94a3b8' : '#c89b54',
+          metalness: 0.6,
+          roughness: 0.3,
+        })
+      )
+    );
+    plus.position.set(x, -0.42, 0);
+    ctx.stageRoot.add(plus);
+  }
+
+  ctx.addLabel(
+    cut ? 'Residual Highway CUT!' : 'Unbroken Residual Highway',
+    cut ? 'Skip connections disabled — signal shattered' : 'Blocks add (+) ΔAttn and ΔMLP without erasing',
+    [-0.6, 2.05, 0],
+    2.9,
+    cut ? '#dc2626' : '#1d4ed8'
+  );
+
+  // Live top-4 probability skyline on the right (with wireframe baseline ghosts when cut)
+  if (showBreakIt) {
+    const baseProbs = snap.baselineRes.trace.finalProbs;
+    const curProbs = trace.finalProbs;
+    const top4 = baseProbs
+      .map((bp, id) => ({ id, bp, cp: curProbs[id] }))
+      .sort((a, b) => b.bp - a.bp)
+      .slice(0, 4);
+
+    top4.forEach((item, rank) => {
+      const x = 3.55 + rank * 0.56;
+      const curH = Math.max(0.1, item.cp * 2.6);
+      const bar = new THREE.Mesh(
+        ctx.trackGeo(new RoundedBoxGeometry(0.34, curH, 0.34, 2, 0.04)),
+        ctx.trackMat(
+          new THREE.MeshStandardMaterial({
+            color: cut ? '#d97706' : '#1d4ed8',
+            roughness: 0.3,
+          })
+        )
+      );
+      bar.position.set(x, -0.55 + curH / 2, 0);
+      ctx.stageRoot.add(bar);
+
+      if (cut) {
+        const gh = Math.max(0.1, item.bp * 2.6);
+        const ghost = new THREE.Mesh(
+          ctx.trackGeo(new THREE.BoxGeometry(0.4, gh, 0.4)),
+          ctx.trackMat(
+            new THREE.MeshBasicMaterial({
+              color: '#1d4ed8',
+              wireframe: true,
+              transparent: true,
+              opacity: 0.5,
+            })
+          )
+        );
+        ghost.position.set(x, -0.55 + gh / 2, 0);
+        ctx.stageRoot.add(ghost);
+      }
+
+      if (rank < 2) {
+        ctx.addLabel(
+          `“${formatToken(snap.tokenizer.vocab[item.id] ?? '')}”`,
+          `${(item.cp * 100).toFixed(0)}%`,
+          [x, -0.2 + Math.max(curH, item.bp * 2.6) + 0.4, 0],
+          0.95,
+          cut ? '#b45309' : '#1d4ed8'
+        );
+      }
+    });
   }
 }
 
-function buildCh3LayerNorm({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    'Pre-LayerNorm: Centering (mean = 0) and scaling (std = 1.0) before every attention/MLP block',
-    '#2563eb'
+// CH 3.3: Pre-LayerNorm Before vs. After 128-bar Strips
+function buildCh3LayerNorm(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const lt = snap.traceRes.trace.layers[snap.layer];
+  if (lt.skipped) {
+    ctx.addLabel(`Block ${snap.layer} disabled`, undefined, [0, 0.6, 0], 2.4, '#b45309');
+    return;
+  }
+  const active: ActiveLayerTrace = lt;
+  const rawVec = active.residualBeforeAttn[snap.queryIdx];
+  const normVec = active.ln1Out[snap.queryIdx];
+
+  let maxAbs = 1e-5;
+  for (const v of rawVec) maxAbs = Math.max(maxAbs, Math.abs(v));
+  for (const v of normVec) maxAbs = Math.max(maxAbs, Math.abs(v));
+
+  draw128BarStrip(ctx, rawVec, -1.45, maxAbs, 1.55);
+  ctx.addLabel(
+    `Raw Residual h_in (Block ${snap.layer})`,
+    `Spiky unnormalized 128 dims · ||h||=${formatNum(vectorL2Norm(rawVec), 2)}`,
+    [0, 1.85, -1.45],
+    2.9,
+    '#b45309'
   );
-  title.position.set(0, 3.2, 0);
-  title.scale.set(9.8, 0.9, 1);
-  group.add(title);
 
-  // Side-by-side comparison: Unnormalized vs Normalized
-  const dimCount = 16;
-  const spacing = 0.38;
-  const startX = -((dimCount - 1) * spacing) / 2;
-
-  // Raw strip
-  const rawLbl = makeLabelSprite('Unbounded Input (Var can explode)', '#dc2626');
-  rawLbl.position.set(0, 2.2, -1.2);
-  rawLbl.scale.set(5.5, 0.5, 1);
-  group.add(rawLbl);
-
-  for (let i = 0; i < dimCount; i++) {
-    const rawVal = Math.sin((i + 1) * 2.3) * 4.2;
-    const h = Math.max(0.1, Math.abs(rawVal) * 0.3);
-    const bar = makeTileMesh(0.28, h, 0.22, 0xfca5a5);
-    bar.position.set(startX + i * spacing, 1.0 + h / 2, -1.2);
-    group.add(bar);
-  }
-
-  // Normalized strip
-  const normLbl = makeLabelSprite('LayerNorm Output: Zero-Mean, Unit-Variance', '#059669');
-  normLbl.position.set(0, 0.2, 1.2);
-  normLbl.scale.set(5.8, 0.5, 1);
-  group.add(normLbl);
-
-  for (let i = 0; i < dimCount; i++) {
-    const normVal = Math.sin((i + 1) * 2.3) * 1.0;
-    const h = Math.max(0.1, Math.abs(normVal) * 0.6);
-    const bar = makeTileMesh(0.28, h, 0.22, 0x86efac);
-    bar.position.set(startX + i * spacing, -0.8 + h / 2, 1.2);
-    group.add(bar);
-  }
+  draw128BarStrip(ctx, normVec, 1.45, maxAbs, 1.55);
+  ctx.addLabel(
+    `After Pre-LayerNorm LN₁`,
+    `Balanced mean≈0, std≈1 (+ γ, β) · ||ln||=${formatNum(vectorL2Norm(normVec), 2)}`,
+    [0, 1.85, 1.45],
+    2.9,
+    '#0f766e'
+  );
 }
 
-function buildCh3RmsNorm({
-  group,
-  traceRes,
-  makeLabelSprite,
-}: Pass2BuildArgs): void {
-  const title = makeLabelSprite(
-    'Modern Upgrade: LayerNorm (with mean centering) vs. RMSNorm (pure RMS scaling)',
-    '#2563eb'
+// CH 3.4: LayerNorm vs. Modern RMSNorm + Final LN_f Break-It
+function buildCh3RmsNorm(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
+  const lnFOff = isFinalLnDisabled(snap.ablation);
+  const lt = snap.traceRes.trace.layers[3];
+  const rawLast = lt.skipped
+    ? lt.residualOut[snap.queryIdx]
+    : lt.residualAfterMlp[snap.queryIdx];
+  const lnFVec = snap.traceRes.trace.lnFOut[snap.queryIdx];
+  const rmsVec = computeRmsNorm(rawLast);
+
+  let maxAbs = 1e-5;
+  for (const v of lnFVec) maxAbs = Math.max(maxAbs, Math.abs(v));
+  for (const v of rmsVec) maxAbs = Math.max(maxAbs, Math.abs(v));
+
+  draw128BarStrip(ctx, lnFVec, -1.45, maxAbs, 1.5);
+  ctx.addLabel(
+    lnFOff ? 'Final LN_f DISABLED (Raw Drift!)' : 'This Model: Final LayerNorm (ln_f)',
+    lnFOff ? 'Unnormalized residual hits unembedding!' : 'Mean-centered + variance scaled (+ γ, β)',
+    [0, 1.85, -1.45],
+    3.0,
+    lnFOff ? '#dc2626' : '#1d4ed8'
   );
-  title.position.set(0, 3.2, 0);
-  title.scale.set(9.8, 0.9, 1);
-  group.add(title);
 
-  const cards = [
-    {
-      title: 'Standard LayerNorm (GPT-2)',
-      sub: 'y = (x − μ) / σ * γ + β',
-      notes: '2 passes over memory (find μ, then σ). Has bias β.',
-      x: -2.8,
-      col: 0x93c5fd,
-    },
-    {
-      title: 'Modern RMSNorm (LLaMA / Gemma)',
-      sub: 'y = x / RMS(x) * γ',
-      notes: '1 pass over memory. Skips μ centering. No bias β.',
-      x: 2.8,
-      col: 0x86efac,
-    },
-  ];
-
-  for (const c of cards) {
-    const plate = makeTileMesh(4.8, 2.2, 0.35, c.col);
-    plate.position.set(c.x, 1.1, 0);
-    group.add(plate);
-
-    const tLbl = makeLabelSprite(c.title, '#0f172a', 'transparent');
-    tLbl.position.set(c.x, 1.8, 0.22);
-    tLbl.scale.set(3.8, 0.45, 1);
-    group.add(tLbl);
-
-    const fLbl = makeLabelSprite(c.sub, '#1e3a8a', '#ffffff');
-    fLbl.position.set(c.x, 1.2, 0.22);
-    fLbl.scale.set(3.2, 0.4, 1);
-    group.add(fLbl);
-
-    const nLbl = makeLabelSprite(c.notes, '#334155', 'transparent');
-    nLbl.position.set(c.x, 0.6, 0.22);
-    nLbl.scale.set(4.2, 0.35, 1);
-    group.add(nLbl);
-  }
+  draw128BarStrip(ctx, rmsVec, 1.45, maxAbs, 1.5);
+  ctx.addLabel(
+    'Modern Frontier: RMSNorm',
+    'Skips mean subtraction — nearly identical stability, faster GPU kernels',
+    [0, 1.85, 1.45],
+    3.1,
+    '#0f766e'
+  );
 }
