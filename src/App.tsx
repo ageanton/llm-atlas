@@ -331,7 +331,20 @@ export function App() {
                 );
               })}
 
-              {activeSceneBeat === 'attn-4-mask-softmax' && (\n                <button\n                  type=\"button\"\n                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}\n                  onClick={() =>\n                    setState((prev) => ({\n                      ...prev,\n                      showPreSoftmax: !prev.showPreSoftmax,\n                    }))\n                  }\n                >\n                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}\n                </button>\n              )}
+              {activeSceneBeat === 'attn-4-mask-softmax' && (
+                <button
+                  type="button"
+                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      showPreSoftmax: !prev.showPreSoftmax,
+                    }))
+                  }
+                >
+                  {state.showPreSoftmax ? 'Showing: Raw Scores' : 'Showing: Softmax %'}
+                </button>
+              )}
 
               {(activeSceneBeat === 'attn-5-value-mixer' ||
                 activeSceneBeat === 'attn-6-multihead-full') && (
