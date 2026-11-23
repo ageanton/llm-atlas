@@ -3,6 +3,12 @@ import {
   CHAPTER_2_BEATS,
   CHAPTER_3_BEATS,
 } from './chapters123';
+import {
+  CHAPTER_5_BEATS,
+  CHAPTER_6_BEATS,
+  CHAPTER_7_BEATS,
+  CHAPTER_8_BEATS,
+} from './chapters5678';
 import type { Edition } from '../state/bookState';
 
 export type SceneBeatId =
@@ -25,7 +31,28 @@ export type SceneBeatId =
   | 'attn-3-scan-row'
   | 'attn-4-mask-softmax'
   | 'attn-5-value-mixer'
-  | 'attn-6-multihead-full';
+  | 'attn-6-multihead-full'
+  | 'ch5-1-mlp-role'
+  | 'ch5-2-expansion'
+  | 'ch5-3-gelu'
+  | 'ch5-4-wdown'
+  | 'ch5-5-swiglu-moe'
+  | 'ch6-1-logit-lens'
+  | 'ch6-2-unembed'
+  | 'ch6-3-temperature'
+  | 'ch6-4-nucleus'
+  | 'ch6-5-autoregression'
+  | 'ch6-6-kv-quant'
+  | 'ch7-1-step0'
+  | 'ch7-2-cross-entropy'
+  | 'ch7-3-manual-backprop'
+  | 'ch7-4-training-replay'
+  | 'ch7-5-hallucination'
+  | 'ch8-1-ablation'
+  | 'ch8-2-scale'
+  | 'ch8-3-frontier-diff'
+  | 'ch8-4-post-training'
+  | 'ch8-5-capstone';
 
 export interface PredictChallenge {
   id: string;
@@ -386,37 +413,37 @@ export const TEXTBOOK_CHAPTERS: ChapterMeta[] = [
     id: 5,
     title: 'Private Thinking & Memory',
     subtitle: 'Feed-Forward Network (MLP), 4× Expansion, GELU, SwiGLU & MoE',
-    status: 'upcoming',
+    status: 'ready',
     openingMystery:
       'If Attention only averages existing vectors, where does the model think privately and store learned facts?',
-    beats: [],
+    beats: CHAPTER_5_BEATS,
   },
   {
     id: 6,
     title: 'Sharpening a Guess & Writing a Story',
     subtitle: 'Logit Lens, Unembedding, Temperature/Top-k/Top-p, Autoregression & KV Cache',
-    status: 'upcoming',
+    status: 'ready',
     openingMystery:
       'If the math is 100% deterministic, why does the exact same prompt give different answers?',
-    beats: [],
+    beats: CHAPTER_6_BEATS,
   },
   {
     id: 7,
     title: 'Where Every Number Came From',
     subtitle: 'Cross-Entropy Loss, Manual Backprop, AdamW, Training Replay & Hallucination',
-    status: 'upcoming',
+    status: 'ready',
     openingMystery:
       'Nobody programmed grammar into this AI—how did 862,464 random numbers organize themselves into English?',
-    beats: [],
+    beats: CHAPTER_7_BEATS,
   },
   {
     id: 8,
     title: 'From Miniature Toy to Frontier AI',
     subtitle: 'Surgical Ablation, Scaling Laws, Modern Upgrades & Post-Training (SFT / RLHF)',
-    status: 'upcoming',
+    status: 'ready',
     openingMystery:
       'What stays identical and what fundamentally changes across a 1,000,000× jump to trillion-parameter LLMs?',
-    beats: [],
+    beats: CHAPTER_8_BEATS,
   },
 ];
 
