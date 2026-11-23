@@ -136,179 +136,208 @@ export function App() {
           setAblated(null);
         }
       } catch (err) {
-        if (!alive) return;
-        setError(err instanceof Error ? err.message : String(err));
+        if (alive) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (alive) setBusy(false);
       }
     };
 
-    run();
+    void run();
     return () => {
       alive = false;
     };
   }, [initInfo, state.prompt, state.ablation]);
 
-  // Keep Three.js Stage updated with live trace and active beat
+  const activeTrace = ablated ?? baseline;
+
+  // Resolve sensible default Query (last token) & Key (strongest earlier token or "Max")
+  const { resolvedQueryIdx, resolvedKeyIdx } = useMemo(() => {
+    if (!activeTrace) return { resolvedQueryIdx: 0, resolvedKeyIdx: 0 };
+    const T = activeTrace.tokens.length;
+    const q = clampInt(state.queryIdx ?? T - 1, 0, Math.max(0, T - 1));
+
+    if (state.keyIdx !== null && Number.isFinite(state.keyIdx)) {
+      return { resolvedQueryIdx: q, resolvedKeyIdx: clampInt(state.keyIdx, 0, Math.max(0, T - 1)) };
+    }
+
+    // Default Key: pick the earlier token with highest attention weight from q, or slot 6 ("Max")
+    const lt = activeTrace.trace.layers[state.layer];
+    let bestK = Math.max(0, q - 1);
+    if (!lt.skipped) {
+      const active: ActiveLayerTrace = lt;
+      const weights = active.attn.attnWeights[state.head][q] ?? [];
+      let maxW = -1;
+      for (let k = 0; k < q; k++) {
+        if (weights[k] > maxW) {
+          maxW = weights[k];
+          bestK = k;
+        }
+      }
+    }
+    return { resolvedQueryIdx: q, resolvedKeyIdx: bestK };
+  }, [activeTrace, state.queryIdx, state.keyIdx, state.layer, state.head]);
+
+  // Push live trace & beat choreography to 3D stage
   useEffect(() => {
-    if (!stageRef.current || !baseline) return;
-
-    const numTokens = baseline.tokens.length;
-    const qIdx = clampInt(
-      state.queryIdx ?? numTokens - 1,
-      0,
-      Math.max(0, numTokens - 1)
-    );
-    const kIdx = clampInt(
-      state.keyIdx ?? Math.max(0, qIdx - 1),
-      0,
-      Math.max(0, numTokens - 1)
-    );
-
-    stageRef.current.render({
+    if (!stageRef.current || !activeTrace) return;
+    stageRef.current.update({
       beat: activeSceneBeat,
       layer: state.layer,
       head: state.head,
-      queryIdx: qIdx,
-      keyIdx: kIdx,
+      queryIdx: resolvedQueryIdx,
+      keyIdx: resolvedKeyIdx,
       showPreSoftmax: state.showPreSoftmax,
       ablation: state.ablation,
-      traceRes: ablated ?? baseline,
+      traceRes: activeTrace,
     });
   }, [
-    baseline,
-    ablated,
+    activeTrace,
     activeSceneBeat,
     state.layer,
     state.head,
-    state.queryIdx,
-    state.keyIdx,
+    resolvedQueryIdx,
+    resolvedKeyIdx,
     state.showPreSoftmax,
     state.ablation,
   ]);
 
-  // Handle window resizing
+  // Keyboard shortcuts: Left/Right arrows step beats, 1/2/3 switch editions
   useEffect(() => {
-    const onResize = () => {
-      if (!mountRef.current || !stageRef.current) return;
-      stageRef.current.resize(
-        mountRef.current.clientWidth,
-        mountRef.current.clientHeight
-      );
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'ArrowRight') {
+        setState((prev) => ({
+          ...prev,
+          beatIndex: clampInt(prev.beatIndex + 1, 0, 5),
+        }));
+      } else if (e.key === 'ArrowLeft') {
+        setState((prev) => ({
+          ...prev,
+          beatIndex: clampInt(prev.beatIndex - 1, 0, 5),
+        }));
+      } else if (e.key === '1') {
+        setState((prev) => ({ ...prev, edition: 'foundations' }));
+      } else if (e.key === '2') {
+        setState((prev) => ({ ...prev, edition: 'practitioner' }));
+      } else if (e.key === '3') {
+        setState((prev) => ({ ...prev, edition: 'formal' }));
+      }
     };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Compute live proof numbers from real forward pass to feed the BookReader card
+  // Build real, beat-specific numeric proof lines from the live trace
   const liveCardLines = useMemo(() => {
-    if (!baseline) return [];
-    const layer: ActiveLayerTrace | undefined = baseline.layers[state.layer];
-    if (!layer) return [];
+    if (!activeTrace || !baseline || !initInfo) return [];
+    const { tokens, trace } = activeTrace;
+    const lt = trace.layers[state.layer];
+    if (lt.skipped) return [`Block ${state.layer} is disabled by Ablation.`];
 
-    const numTokens = baseline.tokens.length;
-    const qIdx = clampInt(
-      state.queryIdx ?? numTokens - 1,
-      0,
-      Math.max(0, numTokens - 1)
-    );
-    const kIdx = clampInt(
-      state.keyIdx ?? Math.max(0, qIdx - 1),
-      0,
-      Math.max(0, numTokens - 1)
-    );
+    const active: ActiveLayerTrace = lt;
+    const qTok = formatTokenExplicit(tokens[resolvedQueryIdx].text);
+    const kTok = formatTokenExplicit(tokens[resolvedKeyIdx].text);
+    const rowW = active.attn.attnWeights[state.head][resolvedQueryIdx];
+    const rowS = active.attn.rawScores[state.head][resolvedQueryIdx];
 
-    const qTok = formatToken(baseline.tokens[qIdx]?.text ?? '');
-    const kTok = formatToken(baseline.tokens[kIdx]?.text ?? '');
-
-    const qVec = layer.attn.q[state.head][qIdx] ?? [];
-    const kVec = layer.attn.k[state.head][kIdx] ?? [];
-    const breakdown = computeDotProductBreakdown(qVec, kVec);
-
-    const probs = layer.attn.probs[state.head][qIdx] ?? [];
-    const pVal = probs[kIdx] ?? 0;
-
-    switch (activeSceneBeat) {
-      case 'attn-1-problem':
-        return [
-          `Active Token [${qIdx}]: "${qTok}" · Block ${state.layer} · Head ${state.head}`,
-          `||Q||_2 = ${formatNum(Math.hypot(...qVec))} · ||K||_2 = ${formatNum(
-            Math.hypot(...kVec)
-          )} · ||V||_2 = ${formatNum(
-            Math.hypot(...(layer.attn.v[state.head][qIdx] ?? []))
-          )}`,
-          `Residual dim 64 projected to 3 × 16 per head via real verified weights.`,
-        ];
-      case 'attn-2-dot-product':
-        return [
-          `Q("${qTok}") · K("${kTok}") elementwise dot product across 16 coords:`,
-          `Positive coord products: +${formatNum(breakdown.positiveVotes)}`,
-          `Negative coord products: ${formatNum(breakdown.negativeVotes)}`,
-          `Sum = ${formatNum(breakdown.rawDot)} · Scaled (÷4) = ${formatNum(
-            breakdown.scaledScore
-          )}`,
-        ];
-      case 'attn-3-scan-row':
-        return [
-          `Query "${qTok}" scanning all ${qIdx + 1} past positions simultaneously:`,
-          `Scale Divisor: √16 = 4.000`,
-          `Max raw dot: ${formatNum(
-            Math.max(...(layer.attn.preSoftmax[state.head][qIdx] ?? []).map((x) => x * 4))
-          )} → Max scaled logit: ${formatNum(
-            Math.max(...(layer.attn.preSoftmax[state.head][qIdx] ?? []))
-          )}`,
-        ];
-      case 'attn-4-mask-softmax':
-        return [
-          `Row ${qIdx} ("${qTok}") Attention Budget Distribution:`,
-          `Attention to "${kTok}" [pos ${kIdx}]: ${(pVal * 100).toFixed(2)}%`,
-          `Future positions (${qIdx + 1}..${numTokens - 1}): Forced to -∞ (0.00% attention)`,
-          `Row Sum: ${(probs.reduce((a, b) => a + b, 0) * 100).toFixed(2)}% (exact probability simplex)`,
-        ];
-      case 'attn-5-value-mixer':
-        return [
-          `Value transport into "${qTok}" context vector:`,
-          `Weight on "${kTok}": ${(pVal * 100).toFixed(1)}% of V("${kTok}")`,
-          `Resulting HeadOut [16]: [${(layer.attn.out[state.head][qIdx] ?? [])
-            .slice(0, 4)
-            .map((x) => formatNum(x, 2))
-            .join(', ')}, ...]`,
-        ];
-      case 'attn-6-multihead-full': {
-        const topTok = baseline.logits
-          ? Object.entries(baseline.logits)
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 3)
-              .map(([tok, logit]) => `"${tok}": ${formatNum(logit, 1)}`)
-              .join(', ')
-          : '';
-        const isOff = isHeadDisabled(state.ablation, state.layer, state.head);
-        return [
-          `Block ${state.layer} 4-Head Output (4 × 16 = 64 dimensions):`,
-          `Head ${state.head} status: ${isOff ? 'ABLATED (zeroed out)' : 'Active'}`,
-          topTok ? `Next Token Logits: ${topTok}` : 'Inference ready.',
-        ];
-      }
+    if (activeSceneBeat === 'attn-1-problem') {
+      const topId = trace.greedyNextTokenId;
+      return [
+        `Sentence length: ${tokens.length} BPE tokens · Highlighted Query: "${qTok}" (slot ${resolvedQueryIdx})`,
+        `Current model top guess after all 4 blocks: "${formatTokenExplicit(initInfo.tokenizer.vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
+      ];
     }
-  }, [baseline, state.layer, state.head, state.queryIdx, state.keyIdx, activeSceneBeat, state.ablation]);
 
-  const tokens = baseline?.tokens ?? [];
-  const numTokens = tokens.length;
-  const resolvedQ = clampInt(
-    state.queryIdx ?? numTokens - 1,
-    0,
-    Math.max(0, numTokens - 1)
-  );
-  const resolvedK = clampInt(
-    state.keyIdx ?? Math.max(0, resolvedQ - 1),
-    0,
-    Math.max(0, numTokens - 1)
-  );
+    if (activeSceneBeat === 'attn-2-dot-product') {
+      const bd = computeDotProductBreakdown(
+        active.attn.q[state.head][resolvedQueryIdx],
+        active.attn.k[state.head][resolvedKeyIdx]
+      );
+      return [
+        `Comparing Q("${qTok}") · K("${kTok}") in Block ${state.layer} Head ${state.head} (32 dims):`,
+        `Positive votes: +${formatNum(bd.positiveVotes, 2)} · Negative votes: ${formatNum(bd.negativeVotes, 2)} → Raw dot = ${formatNum(bd.rawDot, 3)}`,
+        `Scaled score = ${formatNum(bd.rawDot, 3)} ÷ √32 (${formatNum(bd.scaleDivisor, 3)}) = ${formatNum(bd.scaledScore, 3)}`,
+      ];
+    }
 
-  const headAblated = isHeadDisabled(state.ablation, state.layer, state.head);
+    if (activeSceneBeat === 'attn-3-scan-row') {
+      let maxC = 0;
+      let minC = 0;
+      for (let c = 1; c < tokens.length; c++) {
+        if (rowS[c] > rowS[maxC]) maxC = c;
+        if (rowS[c] < rowS[minC]) minC = c;
+      }
+      return [
+        `Query "${qTok}" scanned ${tokens.length} Keys in Block ${state.layer} Head ${state.head}:`,
+        `Highest raw score: "${formatTokenExplicit(tokens[maxC].text)}" (${formatNum(rowS[maxC], 2)}) · Lowest: "${formatTokenExplicit(tokens[minC].text)}" (${formatNum(rowS[minC], 2)})`,
+      ];
+    }
+
+    if (activeSceneBeat === 'attn-4-mask-softmax') {
+      const rowSum = rowW.reduce((a, b) => a + b, 0);
+      const maskedCount = tokens.length - 1 - resolvedQueryIdx;
+      let bestC = 0;
+      for (let c = 1; c <= resolvedQueryIdx; c++) {
+        if (rowW[c] > rowW[bestC]) bestC = c;
+      }
+      return [
+        `Future tokens sealed by Causal Mask: ${maskedCount} · Surviving tokens: ${resolvedQueryIdx + 1}`,
+        `Post-Softmax winner: "${formatTokenExplicit(tokens[bestC].text)}" (${(rowW[bestC] * 100).toFixed(1)}%) · Exact row sum = ${rowSum.toFixed(6)}`,
+      ];
+    }
+
+    if (activeSceneBeat === 'attn-5-value-mixer') {
+      const top3 = rowW
+        .slice(0, resolvedQueryIdx + 1)
+        .map((w, idx) => ({ idx, w }))
+        .sort((a, b) => b.w - a.w)
+        .slice(0, 3);
+      const blendText = top3
+        .map((x) => `${(x.w * 100).toFixed(0)}% V("${formatTokenExplicit(tokens[x.idx].text)}")`)
+        .join(' + ');
+      return [
+        `Value blend poured into "${qTok}" (Block ${state.layer} Head ${state.head}):`,
+        `${blendText} + ...`,
+      ];
+    }
+
+    // Beat 6: Full matrix + live ablation diff
+    const baseTop = baseline.trace.greedyNextTokenId;
+    const curTop = trace.greedyNextTokenId;
+    const off = isHeadDisabled(state.ablation, state.layer, state.head);
+    const lines = [
+      `Block ${state.layer} Head ${state.head}: ${off ? 'DISABLED (Z_h zeroed before W_o)' : 'Active'} · Matrix [${tokens.length} × ${tokens.length}]`,
+      `Prediction: "${formatTokenExplicit(initInfo.tokenizer.vocab[baseTop] ?? '')}" (${(baseline.trace.finalProbs[baseTop] * 100).toFixed(1)}%)${
+        ablated
+          ? ` → "${formatTokenExplicit(initInfo.tokenizer.vocab[curTop] ?? '')}" (${(trace.finalProbs[curTop] * 100).toFixed(1)}%)`
+          : ''
+      }`,
+    ];
+    if (off) {
+      lines.push('Observe how zeroing Head 3 shifts next-token probabilities!');
+    }
+    return lines;
+  }, [
+    activeTrace,
+    baseline,
+    ablated,
+    initInfo,
+    state.layer,
+    state.head,
+    resolvedQueryIdx,
+    resolvedKeyIdx,
+    activeSceneBeat,
+    state.ablation,
+  ]);
+
+  const activeTokens = activeTrace?.tokens ?? [];
+  const headOff = isHeadDisabled(state.ablation, state.layer, state.head);
 
   return (
-    <div className="app-root">
+    <div className={`app-root ${state.lectureMode ? 'is-lecture' : ''}`}>
       {/* Top Application Bar */}
       <header className="top-navbar">
         <div className="nav-left">
@@ -405,7 +434,7 @@ export function App() {
       </header>
 
       {/* Main Split Screen */}
-      <div className={`main-workspace ${state.lectureMode ? 'is-lecture' : ''}`}>
+      <div className="main-workspace">
         {/* Left Column: Interactive Textbook Reader */}
         {!state.lectureMode && (
           <BookReader
@@ -488,7 +517,7 @@ export function App() {
                 activeSceneBeat === 'attn-6-multihead-full') && (
                 <button
                   type="button"
-                  className={`mini-pill ${headAblated ? 'is-warn' : ''}`}
+                  className={`mini-pill ${headOff ? 'is-warn' : ''}`}
                   onClick={() =>
                     setState((prev) => ({
                       ...prev,
@@ -500,7 +529,7 @@ export function App() {
                     }))
                   }
                 >
-                  {headAblated ? `Re-enable H${state.head}` : `Ablate H${state.head}`}
+                  {headOff ? `Re-enable H${state.head}` : `Ablate H${state.head}`}
                 </button>
               )}
             </div>
@@ -526,7 +555,7 @@ export function App() {
           </div>
 
           {/* Bottom HUD: Sequence Token Bar */}
-          {tokens.length > 0 && (
+          {activeTokens.length > 0 && (
             <div className="stage-bottom-hud">
               <div className="token-strip" aria-label="Select active token">
                 <span className="hud-title">
@@ -534,10 +563,10 @@ export function App() {
                     ? 'Comparing Key:'
                     : 'Query Token:'}
                 </span>
-                {tokens.map((tok, idx) => {
-                  const isQ = idx === resolvedQ;
+                {activeTokens.map((tok, idx) => {
+                  const isQ = idx === resolvedQueryIdx;
                   const isK =
-                    activeSceneBeat === 'attn-2-dot-product' && idx === resolvedK;
+                    activeSceneBeat === 'attn-2-dot-product' && idx === resolvedKeyIdx;
                   return (
                     <button
                       key={`${tok.start}-${idx}`}
