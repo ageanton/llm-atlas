@@ -179,21 +179,6 @@ export function App() {
   }, [dotPlaying]);
 
   useEffect(() => {
-    if (!bpePlaying) return;
-    const maxS = Math.max(0, bpeSteps.length - 1);
-    const timer = window.setInterval(() => {
-      setBpeStepIdx((s) => {
-        if (s >= maxS) {
-          setBpePlaying(false);
-          return maxS;
-        }
-        return s + 1;
-      });
-    }, 380);
-    return () => window.clearInterval(timer);
-  }, [bpePlaying, bpeSteps.length]);
-
-  useEffect(() => {
     if (!mixPlaying) return;
     const timer = window.setInterval(() => {
       setMixProgress((p) => {
@@ -316,6 +301,22 @@ export function App() {
   }, [initInfo, state.prompt]);
 
   const safeBpeStep = clampInt(bpeStepIdx, 0, Math.max(0, bpeSteps.length - 1));
+
+  useEffect(() => {
+    if (!bpePlaying) return;
+    const maxS = Math.max(0, bpeSteps.length - 1);
+    const timer = window.setInterval(() => {
+      setBpeStepIdx((s) => {
+        if (s >= maxS) {
+          setBpePlaying(false);
+          return maxS;
+        }
+        return s + 1;
+      });
+    }, 380);
+    return () => window.clearInterval(timer);
+  }, [bpePlaying, bpeSteps.length]);
+
   const activeTrace = ablated ?? baseline;
 
   const { resolvedQueryIdx, resolvedKeyIdx } = useMemo(() => {
