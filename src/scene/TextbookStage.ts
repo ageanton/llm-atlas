@@ -55,6 +55,7 @@ export interface StageSnapshot {
   pcaFocusVocabId: number | null;
   dotSweepDim: number;
   brokenZeroMask: boolean;
+  mixProgress: number;
   bpeSteps: BpeStepSnapshot[];
   bpeStepIdx: number;
   ropeSlotA: number;
@@ -738,7 +739,7 @@ export class TextbookStage {
     );
   }
 
-  // BEAT 5: Value Mixing Bowl (A · V) — Top-4 Value vectors flowing into blended output
+  // BEAT 5: Kinetic Value Mixing Bowl (A · V) — Value strips scale & glide into A·V
   private buildBeat5ValueMixer(
     snap: StageSnapshot,
     active: ActiveLayerTrace
@@ -749,6 +750,7 @@ export class TextbookStage {
     const vMat = active.attn.v[snap.head];
     const outVec = active.attn.weightedV[snap.head][qIdx];
     const headOff = isHeadDisabled(snap.ablation, snap.layer, snap.head);
+    const mix = Math.max(0, Math.min(1, snap.mixProgress));
 
     const contributors = weightsRow
       .slice(0, qIdx + 1)
@@ -770,12 +772,14 @@ export class TextbookStage {
     const drawMiniVec = (
       vec: number[],
       centerX: number,
+      centerY: number,
       centerZ: number,
+      heightMult: number,
       alpha: number
     ) => {
       for (let d = 0; d < D; d++) {
         const norm = vec[d] / maxAbs;
-        const h = Math.max(0.04, Math.abs(norm) * 0.72);
+        const h = Math.max(0.03, Math.abs(norm) * 0.78 * heightMult);
         const bar = new THREE.Mesh(
           barGeo,
           this.trackMat(
@@ -790,7 +794,7 @@ export class TextbookStage {
         bar.scale.y = h;
         bar.position.set(
           centerX - stripLen / 2 + (d + 0.5) * step,
-          vec[d] >= 0 ? h / 2 : -h / 2,
+          centerY + (vec[d] >= 0 ? h / 2 : -h / 2),
           centerZ
         );
         this.stageRoot.add(bar);
@@ -802,19 +806,20 @@ export class TextbookStage {
     contributors.forEach((item, rank) => {
       const z = -2.1 + rank * 1.4;
       const srcX = -2.55;
-      drawMiniVec(item.vec, srcX, z, headOff ? 0.25 : Math.max(0.35, 0.4 + item.w));
+
+      // Stationary source Value strip (dims gently as its weighted slice flows out)
+      drawMiniVec(item.vec, srcX, 0, z, 1.0, headOff ? 0.2 : 0.42);
 
       this.addLabel(
         `V(“${formatToken(tokens[item.idx].text)}”)`,
         `${(item.w * 100).toFixed(1)}% weight`,
-        [srcX, 1.05, z],
+        [srcX, 1.08, z],
         1.7,
         rank === 0 ? '#1d4ed8' : '#475569'
       );
 
-      // Proportional mixing pipe flowing from this Value strip into the A·V output
       const p0 = new THREE.Vector3(srcX + stripLen / 2 + 0.1, 0.15, z);
-      const mid = new THREE.Vector3(0.05, 0.45 + item.w * 0.8, z * 0.45);
+      const mid = new THREE.Vector3(0.05, 0.45 + item.w * 0.85, z * 0.45);
       const p1 = new THREE.Vector3(destPos.x - stripLen / 2 - 0.1, 0.15, 0);
       const curve = new THREE.CatmullRomCurve3([p0, mid, p1]);
       const radius = headOff ? 0.015 : 0.02 + item.w * 0.11;
@@ -825,19 +830,38 @@ export class TextbookStage {
             color: headOff ? '#cbd5e1' : rank === 0 ? '#d97706' : '#2563eb',
             roughness: 0.25,
             transparent: true,
-            opacity: headOff ? 0.3 : Math.min(0.92, 0.25 + item.w * 0.9),
+            opacity: headOff ? 0.25 : Math.min(0.92, 0.2 + item.w * 0.9),
           })
         )
       );
       this.stageRoot.add(tube);
+
+      // Kinetic scaled Value slice gliding from source into destination A·V
+      if (!headOff && mix < 0.99) {
+        const pt = curve.getPointAt(mix);
+        const hScale = (1 - mix) * 1.0 + mix * Math.max(0.18, item.w * 1.6);
+        drawMiniVec(
+          item.vec,
+          pt.x,
+          pt.y,
+          pt.z,
+          hScale,
+          Math.max(0.35, 1.0 - mix * 0.35)
+        );
+      }
     });
 
     // Blended output vector Z_h[queryIdx] = (A · V)[queryIdx]
-    drawMiniVec(outVec, destPos.x, 0, 1);
+    const outAlpha = headOff ? 0.35 : 0.18 + mix * 0.82;
+    drawMiniVec(outVec, destPos.x, 0, 0, Math.max(0.15, mix), outAlpha);
     this.addLabel(
-      headOff ? 'Blended A·V (Zeroed!)' : `Blended A·V for “${formatToken(tokens[qIdx].text)}”`,
+      headOff
+        ? 'Blended A·V (Zeroed!)'
+        : mix < 0.98
+          ? `Mixing Values (${Math.round(mix * 100)}%)`
+          : `Blended A·V for “${formatToken(tokens[qIdx].text)}”`,
       '32-dim context update → W_o → + Residual',
-      [destPos.x, 1.32, 0],
+      [destPos.x, 1.35, 0],
       2.35,
       headOff ? '#b45309' : '#0f766e',
       headOff

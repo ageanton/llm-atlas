@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BookReader } from './components/BookReader';
 import { PipelineMinimap } from './components/PipelineMinimap';
+import { Precision2DStage } from './components/Precision2DStage';
 import {
   PRESET_PROMPTS,
   TEXTBOOK_CHAPTERS,
@@ -75,6 +76,13 @@ const TOKEN_INTERACTIVE_BEATS = new Set<SceneBeatId>([
   'ch5-5-swiglu-moe',
 ]);
 
+const HYBRID_2D_BEATS = new Set<SceneBeatId>([
+  'ch1-2-bpe-merges',
+  'ch5-3-gelu',
+  'ch7-3-manual-backprop',
+  'ch8-4-post-training',
+]);
+
 export function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<TextbookStage | null>(null);
@@ -97,6 +105,10 @@ export function App() {
   const [dotSweepDim, setDotSweepDim] = useState<number>(32);
   const [dotPlaying, setDotPlaying] = useState<boolean>(false);
   const [brokenZeroMask, setBrokenZeroMask] = useState<boolean>(false);
+  const [prefer2D, setPrefer2D] = useState<boolean>(true);
+  const [bpePlaying, setBpePlaying] = useState<boolean>(false);
+  const [mixProgress, setMixProgress] = useState<number>(1);
+  const [mixPlaying, setMixPlaying] = useState<boolean>(false);
   const [bpeStepIdx, setBpeStepIdx] = useState<number>(0);
   const [ropeSlotA, setRopeSlotA] = useState<number>(2);
   const [ropeSlotB, setRopeSlotB] = useState<number>(5);
@@ -134,6 +146,14 @@ export function App() {
   // Reset beat-local animation states cleanly on beat change
   useEffect(() => {
     setHoverTip(null);
+    setBpePlaying(false);
+    setMixPlaying(false);
+    setMixProgress(1);
+    setPrefer2D(
+      activeSceneBeat === 'ch1-2-bpe-merges' ||
+        activeSceneBeat === 'ch5-3-gelu' ||
+        activeSceneBeat === 'ch8-4-post-training'
+    );
     if (activeSceneBeat !== 'attn-2-dot-product') {
       setDotPlaying(false);
       setDotSweepDim(32);
@@ -157,6 +177,33 @@ export function App() {
     }, 110);
     return () => window.clearInterval(timer);
   }, [dotPlaying]);
+
+  useEffect(() => {
+    if (!bpePlaying) return;
+    const maxS = Math.max(0, bpeSteps.length - 1);
+    const timer = window.setInterval(() => {
+      setBpeStepIdx((s) => {
+        if (s >= maxS) {
+          setBpePlaying(false);
+          return maxS;
+        }
+        return s + 1;
+      });
+    }, 380);
+    return () => window.clearInterval(timer);
+  }, [bpePlaying, bpeSteps.length]);
+
+  useEffect(() => {
+    if (!mixPlaying) return;
+    const timer = window.setInterval(() => {
+      setMixProgress((p) => {
+        const next = Math.min(1, p + 0.04);
+        if (next >= 1) setMixPlaying(false);
+        return next;
+      });
+    }, 45);
+    return () => window.clearInterval(timer);
+  }, [mixPlaying]);
 
   useEffect(() => {
     const el = mountRef.current;
@@ -311,6 +358,7 @@ export function App() {
       pcaFocusVocabId,
       dotSweepDim,
       brokenZeroMask,
+      mixProgress,
       bpeSteps,
       bpeStepIdx: safeBpeStep,
       ropeSlotA,
@@ -340,6 +388,7 @@ export function App() {
     pcaFocusVocabId,
     dotSweepDim,
     brokenZeroMask,
+    mixProgress,
     bpeSteps,
     safeBpeStep,
     ropeSlotA,
@@ -661,6 +710,8 @@ export function App() {
   const mlpOff = (state.ablation.disabledMlpBlocks ?? []).includes(state.layer);
   const layerOff = (state.ablation.disabledLayers ?? []).includes(state.layer);
   const showTokenBar = TOKEN_INTERACTIVE_BEATS.has(activeSceneBeat);
+  const supports2D = HYBRID_2D_BEATS.has(activeSceneBeat);
+  const is2DActive = supports2D && prefer2D;
 
   return (
     <div className="book-app">
@@ -764,6 +815,35 @@ export function App() {
         <section className="stage-pane" aria-label="Interactive 3D Stage">
           <div ref={mountRef} className="canvas-mount" />
 
+          {is2DActive && activeTrace && (
+            <Precision2DStage
+              beat={activeSceneBeat}
+              layer={state.layer}
+              queryIdx={resolvedQueryIdx}
+              traceRes={activeTrace}
+              bpeSteps={bpeSteps}
+              bpeStepIdx={safeBpeStep}
+              bpePlaying={bpePlaying}
+              onSetBpeStep={(s) => {
+                setBpePlaying(false);
+                setBpeStepIdx(s);
+              }}
+              onToggleBpePlay={() => {
+                if (bpePlaying) {
+                  setBpePlaying(false);
+                } else {
+                  if (safeBpeStep >= bpeSteps.length - 1) setBpeStepIdx(0);
+                  setBpePlaying(true);
+                }
+              }}
+              geluProbeX={geluProbeX}
+              onChangeGeluX={setGeluProbeX}
+              onSelectToken={(idx) =>
+                setState((prev) => ({ ...prev, queryIdx: idx, keyIdx: null }))
+              }
+            />
+          )}
+
           <PipelineMinimap
             activeChapterId={state.chapterId}
             onSelectChapter={(chapterId) => {
@@ -772,7 +852,7 @@ export function App() {
             }}
           />
 
-          {hoverTip && (
+          {!is2DActive && hoverTip && (
             <div
               className="stage-tooltip mono"
               style={{ left: hoverTip.x, top: hoverTip.y }}
@@ -971,6 +1051,39 @@ export function App() {
                 </button>
               )}
 
+              {activeSceneBeat === 'attn-5-value-mixer' && (
+                <>
+                  <button
+                    type="button"
+                    className={`mini-btn ${mixPlaying ? 'is-active' : ''}`}
+                    onClick={() => {
+                      if (mixPlaying) {
+                        setMixPlaying(false);
+                      } else {
+                        setMixProgress(0);
+                        setMixPlaying(true);
+                      }
+                    }}
+                  >
+                    {mixPlaying ? 'Pause Mix' : 'Animate Mix'}
+                  </button>
+                  <label className="hud-slider mono">
+                    <span>Mix: {Math.round(mixProgress * 100)}%</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={mixProgress}
+                      onChange={(e) => {
+                        setMixPlaying(false);
+                        setMixProgress(Number(e.target.value));
+                      }}
+                    />
+                  </label>
+                </>
+              )}
+
               {activeSceneBeat === 'ch5-3-gelu' && (
                 <label className="hud-slider mono">
                   <span>GELU x: {geluProbeX.toFixed(2)}</span>
@@ -1100,9 +1213,26 @@ export function App() {
                   Reset Ablation
                 </button>
               )}
-              <button type="button" className="mini-btn" onClick={() => stageRef.current?.resetCamera()}>
-                Reset View
-              </button>
+              {supports2D && (
+                <button
+                  type="button"
+                  className={`mini-btn ${is2DActive ? 'is-active' : ''}`}
+                  onClick={() => setPrefer2D((v) => !v)}
+                >
+                  {activeSceneBeat === 'ch7-3-manual-backprop'
+                    ? is2DActive
+                      ? 'Back to 3D Real Valley'
+                      : '2-Layer Chain-Rule Circuit'
+                    : is2DActive
+                      ? 'Switch to 3D View'
+                      : 'Switch to Precision 2D'}
+                </button>
+              )}
+              {!is2DActive && (
+                <button type="button" className="mini-btn" onClick={() => stageRef.current?.resetCamera()}>
+                  Reset View
+                </button>
+              )}
             </div>
           </div>
 
@@ -1151,9 +1281,11 @@ export function App() {
                 </div>
               )}
 
-              <div className="camera-hint">
-                Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
-              </div>
+              {!is2DActive && (
+                <div className="camera-hint">
+                  Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
+                </div>
+              )}
             </div>
           )}
         </section>
