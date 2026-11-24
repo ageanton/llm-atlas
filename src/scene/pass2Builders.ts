@@ -49,6 +49,7 @@ export interface Pass2Snapshot {
   tokenizer: TokenizerData;
   wteWeights: Float32Array | null;
   pcaCloud: PcaCloudData | null;
+  pcaFocusVocabId: number | null;
   bpeSteps: BpeStepSnapshot[];
   bpeStepIdx: number;
   ropeSlotA: number;
@@ -547,13 +548,14 @@ function buildCh2PcaCloud(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
     return;
   }
 
-  const tok = snap.traceRes.tokens[snap.queryIdx];
+  const focusVocabId =
+    snap.pcaFocusVocabId ?? snap.traceRes.tokens[snap.queryIdx].id;
   const dModel = snap.traceRes.trace.tokEmb[0].length;
   const neighbors = findCosineNeighbors(
     snap.wteWeights,
     snap.tokenizer.vocab,
     dModel,
-    tok.id,
+    focusVocabId,
     5
   );
   const neighborMap = new Map(neighbors.map((n) => [n.id, n]));
@@ -591,7 +593,7 @@ function buildCh2PcaCloud(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
 
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
-    const isTarget = p.id === tok.id;
+    const isTarget = p.id === focusVocabId;
     const isNeighbor = neighborMap.has(p.id);
     const isPrompt = promptIdSet.has(p.id);
     dummy.position.set(p.x, p.y * 0.75 + 0.3, p.z);
@@ -606,9 +608,11 @@ function buildCh2PcaCloud(ctx: Pass2StageContext, snap: Pass2Snapshot): void {
   inst.instanceMatrix.needsUpdate = true;
   if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
   ctx.stageRoot.add(inst);
+  inst.userData = { kind: 'pcaCloud' };
+  ctx.interactives.push(inst);
 
   // Connect target token to its top-5 128D cosine similarity neighbors
-  const tp = pts[tok.id];
+  const tp = pts[focusVocabId];
   if (tp) {
     const tPos = new THREE.Vector3(tp.x, tp.y * 0.75 + 0.3, tp.z);
     ctx.addLabel(

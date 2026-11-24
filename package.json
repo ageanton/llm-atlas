@@ -1,6 +1,6 @@
 {
   "name": "llm-atlas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,11 +11,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "katex": "^0.16.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "^0.170.0"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.7",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

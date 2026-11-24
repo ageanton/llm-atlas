@@ -731,3 +731,165 @@ select:focus-visible {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* Color-coded KaTeX + Worked Examples */
+.math-block {
+  margin: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.katex-card {
+  background: var(--paper-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.katex-render .katex-display {
+  margin: 4px 0;
+}
+
+.math-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.math-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.math-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.worked-card {
+  border: 1px solid #bfdbfe;
+  background: var(--accent-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.worked-toggle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #1e3a8a;
+  cursor: pointer;
+}
+
+.worked-steps {
+  margin: 0;
+  padding: 0 16px 11px 28px;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: #1e3a8a;
+}
+
+/* Persistent Transformer Pipeline Minimap */
+.pipeline-minimap {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(203, 213, 225, 0.85);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+  z-index: 7;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+}
+
+.minimap-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.minimap-arrow {
+  font-size: 0.68rem;
+  color: var(--border-strong);
+}
+
+.minimap-node {
+  border: none;
+  background: transparent;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.minimap-node:hover {
+  background: var(--paper-soft);
+  color: var(--ink);
+}
+
+.minimap-node.is-active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.stage-hud-top {
+  top: 48px;
+}
+
+/* Direct 3D Hover Tooltip */
+.stage-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 20;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.94);
+  color: #f8fafc;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.25);
+  transform: translate(12px, -50%);
+  max-width: 280px;
+}
+
+.stage-tooltip-title {
+  font-weight: 700;
+  color: #93c5fd;
+}
+
+@media (max-width: 960px) {
+  .pipeline-minimap {
+    display: none;
+  }
+
+  .stage-hud-top {
+    top: 10px;
+  }
+}

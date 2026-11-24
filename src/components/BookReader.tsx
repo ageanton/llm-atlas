@@ -5,6 +5,7 @@ import {
   type ChapterMeta,
 } from '../content/bookData';
 import type { Edition } from '../state/bookState';
+import { MathFormula } from './MathFormula';
 import { PredictCard } from './PredictCard';
 
 const EDITIONS: Edition[] = ['foundations', 'practitioner', 'formal'];
@@ -145,6 +146,8 @@ export function BookReader({
                 {para}
               </p>
             ))}
+
+            <MathFormula beatId={beat.sceneBeat} edition={edition} />
 
             {liveCardLines.length > 0 && (
               <div className="live-proof-box mono">
