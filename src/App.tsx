@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BookReader } from './components/BookReader';
+import { PipelineMinimap } from './components/PipelineMinimap';
 import {
   PRESET_PROMPTS,
   TEXTBOOK_CHAPTERS,
@@ -11,7 +12,7 @@ import type {
   EngineInitResult,
   EngineTraceResult,
 } from './engine/types';
-import { TextbookStage } from './scene/TextbookStage';
+import { TextbookStage, type HoverTooltip } from './scene/TextbookStage';
 import {
   clampInt,
   hasActiveAblation,
@@ -52,6 +53,28 @@ import {
   type TrainingReplayData,
 } from './utils/pass3Math';
 
+const TOKEN_INTERACTIVE_BEATS = new Set<SceneBeatId>([
+  'ch1-1-extremes',
+  'ch1-3-spaces-blindspot',
+  'ch1-4-token-ids',
+  'ch1-5-context-window',
+  'ch2-1-wte-lookup',
+  'ch2-2-pca-cloud',
+  'ch2-4-wpe-add',
+  'ch3-3-layernorm',
+  'ch3-4-rmsnorm',
+  'attn-1-problem',
+  'attn-2-dot-product',
+  'attn-3-scan-row',
+  'attn-4-mask-softmax',
+  'attn-5-value-mixer',
+  'attn-6-multihead-full',
+  'ch5-2-expansion',
+  'ch5-3-gelu',
+  'ch5-4-wdown',
+  'ch5-5-swiglu-moe',
+]);
+
 export function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<TextbookStage | null>(null);
@@ -68,7 +91,12 @@ export function App() {
   const [baseline, setBaseline] = useState<EngineTraceResult | null>(null);
   const [ablated, setAblated] = useState<EngineTraceResult | null>(null);
 
-  // Interactive chapter lab states
+  // Interactive lab + polish states
+  const [hoverTip, setHoverTip] = useState<HoverTooltip | null>(null);
+  const [pcaFocusVocabId, setPcaFocusVocabId] = useState<number | null>(null);
+  const [dotSweepDim, setDotSweepDim] = useState<number>(32);
+  const [dotPlaying, setDotPlaying] = useState<boolean>(false);
+  const [brokenZeroMask, setBrokenZeroMask] = useState<boolean>(false);
   const [bpeStepIdx, setBpeStepIdx] = useState<number>(0);
   const [ropeSlotA, setRopeSlotA] = useState<number>(2);
   const [ropeSlotB, setRopeSlotB] = useState<number>(5);
@@ -103,11 +131,39 @@ export function App() {
     }
   }, [state]);
 
+  // Reset beat-local animation states cleanly on beat change
+  useEffect(() => {
+    setHoverTip(null);
+    if (activeSceneBeat !== 'attn-2-dot-product') {
+      setDotPlaying(false);
+      setDotSweepDim(32);
+    }
+    if (activeSceneBeat !== 'attn-4-mask-softmax') {
+      setBrokenZeroMask(false);
+    }
+  }, [activeSceneBeat]);
+
+  // Kinetic Q·K sweep timer
+  useEffect(() => {
+    if (!dotPlaying) return;
+    const timer = window.setInterval(() => {
+      setDotSweepDim((d) => {
+        if (d >= 32) {
+          setDotPlaying(false);
+          return 32;
+        }
+        return d + 1;
+      });
+    }, 110);
+    return () => window.clearInterval(timer);
+  }, [dotPlaying]);
+
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
     const stage = new TextbookStage(el, {
       onPickToken: (idx) => {
+        setPcaFocusVocabId(null);
         setState((prev) => {
           if (prev.chapterId === 4 && prev.beatIndex === 1) {
             return { ...prev, keyIdx: idx };
@@ -117,6 +173,12 @@ export function App() {
       },
       onPickHead: (head) => {
         setState((prev) => ({ ...prev, head }));
+      },
+      onPickVocabToken: (vocabId) => {
+        setPcaFocusVocabId(vocabId);
+      },
+      onHoverInfo: (tip) => {
+        setHoverTip(tip);
       },
     });
     stageRef.current = stage;
@@ -246,6 +308,9 @@ export function App() {
       tokenizer: initInfo.tokenizer,
       wteWeights,
       pcaCloud,
+      pcaFocusVocabId,
+      dotSweepDim,
+      brokenZeroMask,
       bpeSteps,
       bpeStepIdx: safeBpeStep,
       ropeSlotA,
@@ -272,6 +337,9 @@ export function App() {
     state.ablation,
     wteWeights,
     pcaCloud,
+    pcaFocusVocabId,
+    dotSweepDim,
+    brokenZeroMask,
     bpeSteps,
     safeBpeStep,
     ropeSlotA,
@@ -350,12 +418,9 @@ export function App() {
     const kTok = formatTokenExplicit(tokens[resolvedKeyIdx].text);
     const vocab = initInfo.tokenizer.vocab;
 
-    // Chapters 1-3
     if (activeSceneBeat === 'ch1-1-extremes') {
       const n = state.prompt.length;
-      return [
-        `Sentence: ${n} chars → ${tokens.length} BPE tokens (${(n / Math.max(1, tokens.length)).toFixed(2)} chars/token)`,
-      ];
+      return [`Sentence: ${n} chars → ${tokens.length} BPE tokens (${(n / Math.max(1, tokens.length)).toFixed(2)} chars/token)`];
     }
     if (activeSceneBeat === 'ch1-2-bpe-merges') {
       const s = bpeSteps[safeBpeStep];
@@ -369,9 +434,7 @@ export function App() {
         : [];
     }
     if (activeSceneBeat === 'ch1-3-spaces-blindspot') {
-      return [
-        `Selected "${qTok}" (ID #${qTokObj.id}, ${qTokObj.text.length} chars inside 1 atomic token)`,
-      ];
+      return [`Selected "${qTok}" (ID #${qTokObj.id}, ${qTokObj.text.length} chars inside 1 atomic token)`];
     }
     if (activeSceneBeat === 'ch1-4-token-ids') {
       return [`IDs: [${tokens.slice(0, 12).map((t) => t.id).join(', ')}${tokens.length > 12 ? ', ...' : ''}]`];
@@ -384,18 +447,19 @@ export function App() {
       return [`wte[#${qTokObj.id}] ("${qTok}"): ||v||=${formatNum(st.l2Norm, 3)} · range [${formatNum(st.min, 2)}, ${formatNum(st.max, 2)}]`];
     }
     if (activeSceneBeat === 'ch2-2-pca-cloud' && wteWeights && pcaCloud) {
-      const nbs = findCosineNeighbors(wteWeights, vocab, initInfo.manifest.config.d_model, qTokObj.id, 5);
+      const focusId = pcaFocusVocabId ?? qTokObj.id;
+      const focusLabel = formatTokenExplicit(vocab[focusId] ?? '');
+      const nbs = findCosineNeighbors(wteWeights, vocab, initInfo.manifest.config.d_model, focusId, 5);
       return [
-        `128D cosine neighbors of "${qTok}": ${nbs.map((n) => `"${formatToken(n.text)}" (${n.cosine.toFixed(2)})`).join(', ')}`,
+        `128D cosine neighbors of "${focusLabel}" (#${focusId}): ${nbs.map((n) => `"${formatToken(n.text)}" (${n.cosine.toFixed(2)})`).join(', ')}`,
+        'Tip: Hover or click ANY of the 512 floating spheres directly in 3D!',
       ];
     }
     if (activeSceneBeat === 'ch2-3-order-blind') {
       return ['Without positional stamps, permuting input words leaves the multiset of vectors unchanged.'];
     }
     if (activeSceneBeat === 'ch2-4-wpe-add') {
-      return [
-        `Slot ${resolvedQueryIdx}: ||wte||=${formatNum(vectorL2Norm(trace.tokEmb[resolvedQueryIdx]), 2)} + ||wpe||=${formatNum(vectorL2Norm(trace.posEmb[resolvedQueryIdx]), 2)} → h₀ [${tokens.length}×128]`,
-      ];
+      return [`Slot ${resolvedQueryIdx}: ||wte||=${formatNum(vectorL2Norm(trace.tokEmb[resolvedQueryIdx]), 2)} + ||wpe||=${formatNum(vectorL2Norm(trace.posEmb[resolvedQueryIdx]), 2)} → h₀ [${tokens.length}×128]`];
     }
     if (activeSceneBeat === 'ch2-5-rope') {
       const d = ropeSlotB - ropeSlotA;
@@ -417,18 +481,12 @@ export function App() {
       if (lt.skipped) return [`Block ${state.layer} disabled.`];
       const rSt = computeVectorStats(lt.residualBeforeAttn[resolvedQueryIdx]);
       const lSt = computeVectorStats(lt.ln1Out[resolvedQueryIdx]);
-      return [
-        `Before LN₁: mean=${formatNum(rSt.mean, 3)}, std=${formatNum(rSt.std, 3)} → After LN₁: mean=${formatNum(lSt.mean, 3)}, std=${formatNum(lSt.std, 3)}`,
-      ];
+      return [`Before LN₁: mean=${formatNum(rSt.mean, 3)}, std=${formatNum(rSt.std, 3)} → After LN₁: mean=${formatNum(lSt.mean, 3)}, std=${formatNum(lSt.std, 3)}`];
     }
     if (activeSceneBeat === 'ch3-4-rmsnorm') {
       const off = isFinalLnDisabled(state.ablation);
-      return [
-        `Final LN_f: ${off ? 'DISABLED' : 'Active'} · Loss: ${trace.inputLoss?.toFixed(3) ?? '-'}`,
-      ];
+      return [`Final LN_f: ${off ? 'DISABLED' : 'Active'} · Loss: ${trace.inputLoss?.toFixed(3) ?? '-'}`];
     }
-
-    // Chapter 4
     if (activeSceneBeat.startsWith('attn-')) {
       const lt = trace.layers[state.layer];
       if (lt.skipped) return [`Block ${state.layer} disabled.`];
@@ -440,12 +498,17 @@ export function App() {
           active.attn.k[state.head][resolvedKeyIdx]
         );
         return [
-          `Q("${qTok}") · K("${kTok}") = ${formatNum(bd.rawDot, 3)} ÷ √32 = ${formatNum(bd.scaledScore, 3)}`,
+          `Q("${qTok}") · K("${kTok}") = ${formatNum(bd.rawDot, 3)} ÷ √32 = ${formatNum(bd.scaledScore, 3)} (showing ${dotSweepDim}/32 dims)`,
+          'Tip: Hover any bar in 3D for exact q[d] × k[d], or click Animate Q·K above.',
         ];
       }
       if (activeSceneBeat === 'attn-4-mask-softmax') {
+        const futureCount = tokens.length - 1 - resolvedQueryIdx;
         return [
-          `Masked future tokens: ${tokens.length - 1 - resolvedQueryIdx} · Row sum = ${rowW.reduce((a, b) => a + b, 0).toFixed(6)}`,
+          `Masked future tokens: ${futureCount} · Mode: ${brokenZeroMask ? 'BROKEN (0 → exp(0)=1 leaks!)' : 'Valid (-∞ → 0.0%)'}`,
+          futureCount === 0
+            ? 'Click an earlier token below (like "dog" or "Max") to see future slots appear to its right!'
+            : `Valid post-softmax row sum = ${rowW.reduce((a, b) => a + b, 0).toFixed(6)}`,
         ];
       }
       if (activeSceneBeat === 'attn-5-value-mixer') {
@@ -457,12 +520,8 @@ export function App() {
         return [top3.map((x) => `${(x.w * 100).toFixed(0)}% V("${formatTokenExplicit(tokens[x.idx].text)}")`).join(' + ')];
       }
       const topId = trace.greedyNextTokenId;
-      return [
-        `Block ${state.layer} H${state.head} · Next guess: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
-      ];
+      return [`Block ${state.layer} H${state.head} · Next guess: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`];
     }
-
-    // Chapter 5
     if (activeSceneBeat.startsWith('ch5-')) {
       const lt = trace.layers[state.layer];
       if (lt.skipped) return [`Block ${state.layer} disabled.`];
@@ -473,12 +532,8 @@ export function App() {
           `Live Block ${state.layer} MLP ("${qTok}"): ${firing} / 512 neurons active (>0.05)`,
         ];
       }
-      return [
-        `Block ${state.layer} MLP ("${qTok}"): 128 → 512 (${firing} active) → 128 · ||Δmlp|| = ${formatNum(vectorL2Norm(lt.mlp.output[resolvedQueryIdx]), 2)}`,
-      ];
+      return [`Block ${state.layer} MLP ("${qTok}"): 128 → 512 (${firing} active) → 128 · ||Δmlp|| = ${formatNum(vectorL2Norm(lt.mlp.output[resolvedQueryIdx]), 2)}`];
     }
-
-    // Chapter 6
     if (activeSceneBeat.startsWith('ch6-')) {
       const topId = trace.greedyNextTokenId;
       const pool = computeSampledDistribution(trace.finalLogits, temperature, topK, topP);
@@ -494,8 +549,6 @@ export function App() {
         `Sampling pool: ${pool.length} tokens (τ=${temperature.toFixed(2)}, k=${topK}, p=${topP.toFixed(2)}) · T=${tokens.length}/64`,
       ];
     }
-
-    // Chapter 7
     if (activeSceneBeat === 'ch7-2-cross-entropy' && wteWeights) {
       const { entries } = computePerTokenLoss(
         baseline.trace.lnFOut,
@@ -537,12 +590,8 @@ export function App() {
     }
     if (activeSceneBeat === 'ch7-5-hallucination') {
       const topId = trace.greedyNextTokenId;
-      return [
-        `Current top prediction: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`,
-      ];
+      return [`Current top prediction: "${formatTokenExplicit(vocab[topId] ?? '')}" (${(trace.finalProbs[topId] * 100).toFixed(1)}%)`];
     }
-
-    // Chapter 8
     if (activeSceneBeat === 'ch8-1-ablation') {
       const bTop = baseline.trace.greedyNextTokenId;
       const cTop = trace.greedyNextTokenId;
@@ -563,9 +612,7 @@ export function App() {
         `${s.layers} layers · d_model ${s.dModel.toLocaleString()} · ${s.heads} heads · ctx ${s.context.toLocaleString()}`,
       ];
     }
-    return [
-      `${initInfo.manifest.total_params.toLocaleString()} real params · ${tokens.length} tokens · traced in ${activeTrace.elapsedMs}ms`,
-    ];
+    return [`${initInfo.manifest.total_params.toLocaleString()} real params · ${tokens.length} tokens · traced in ${activeTrace.elapsedMs}ms`];
   }, [
     activeTrace,
     baseline,
@@ -582,6 +629,9 @@ export function App() {
     safeBpeStep,
     wteWeights,
     pcaCloud,
+    pcaFocusVocabId,
+    dotSweepDim,
+    brokenZeroMask,
     ropeSlotA,
     ropeSlotB,
     geluProbeX,
@@ -610,6 +660,7 @@ export function App() {
   const attnOff = (state.ablation.disabledAttnBlocks ?? []).includes(state.layer);
   const mlpOff = (state.ablation.disabledMlpBlocks ?? []).includes(state.layer);
   const layerOff = (state.ablation.disabledLayers ?? []).includes(state.layer);
+  const showTokenBar = TOKEN_INTERACTIVE_BEATS.has(activeSceneBeat);
 
   return (
     <div className="book-app">
@@ -626,6 +677,7 @@ export function App() {
             if (!draftPrompt.trim()) return;
             setBpeStepIdx(0);
             setWeightDelta(0);
+            setPcaFocusVocabId(null);
             setState((prev) => ({
               ...prev,
               prompt: draftPrompt,
@@ -651,6 +703,7 @@ export function App() {
               setDraftPrompt(p.text);
               setBpeStepIdx(0);
               setWeightDelta(0);
+              setPcaFocusVocabId(null);
               setState((prev) => ({
                 ...prev,
                 prompt: p.text,
@@ -711,6 +764,24 @@ export function App() {
         <section className="stage-pane" aria-label="Interactive 3D Stage">
           <div ref={mountRef} className="canvas-mount" />
 
+          <PipelineMinimap
+            activeChapterId={state.chapterId}
+            onSelectChapter={(chapterId) => {
+              setShowContents(false);
+              setState((prev) => ({ ...prev, chapterId, beatIndex: 0 }));
+            }}
+          />
+
+          {hoverTip && (
+            <div
+              className="stage-tooltip mono"
+              style={{ left: hoverTip.x, top: hoverTip.y }}
+            >
+              <div className="stage-tooltip-title">{hoverTip.title}</div>
+              <div>{hoverTip.detail}</div>
+            </div>
+          )}
+
           {!initInfo && !error && (
             <div className="loading-pill">
               Loading 862,464 real trained parameters...
@@ -742,6 +813,16 @@ export function App() {
                     Step +1
                   </button>
                 </>
+              )}
+
+              {activeSceneBeat === 'ch2-2-pca-cloud' && pcaFocusVocabId !== null && initInfo && (
+                <button
+                  type="button"
+                  className="mini-btn is-active"
+                  onClick={() => setPcaFocusVocabId(null)}
+                >
+                  Cloud Focus: “{formatToken(initInfo.tokenizer.vocab[pcaFocusVocabId] ?? '')}” ×
+                </button>
               )}
 
               {activeSceneBeat === 'ch2-5-rope' && (
@@ -815,14 +896,64 @@ export function App() {
                 </>
               )}
 
+              {activeSceneBeat === 'attn-2-dot-product' && (
+                <>
+                  <button
+                    type="button"
+                    className={`mini-btn ${dotPlaying ? 'is-active' : ''}`}
+                    onClick={() => {
+                      if (dotPlaying) {
+                        setDotPlaying(false);
+                      } else {
+                        setDotSweepDim(1);
+                        setDotPlaying(true);
+                      }
+                    }}
+                  >
+                    {dotPlaying ? 'Pause Sweep' : 'Animate Q·K'}
+                  </button>
+                  <label className="hud-slider mono">
+                    <span>Dims: {dotSweepDim}/32</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={32}
+                      value={dotSweepDim}
+                      onChange={(e) => {
+                        setDotPlaying(false);
+                        setDotSweepDim(Number(e.target.value));
+                      }}
+                    />
+                  </label>
+                </>
+              )}
+
               {activeSceneBeat === 'attn-4-mask-softmax' && (
-                <button
-                  type="button"
-                  className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
-                  onClick={() => setState((prev) => ({ ...prev, showPreSoftmax: !prev.showPreSoftmax }))}
-                >
-                  {state.showPreSoftmax ? 'Raw Scores' : 'Softmax %'}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={`mini-btn ${state.showPreSoftmax ? 'is-active' : ''}`}
+                    onClick={() => setState((prev) => ({ ...prev, showPreSoftmax: !prev.showPreSoftmax }))}
+                  >
+                    {state.showPreSoftmax ? 'Raw Scores' : 'Softmax %'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mini-btn ${brokenZeroMask ? 'is-warm' : ''}`}
+                    onClick={() => {
+                      // If on last token, step back 3 tokens so future slots are immediately visible!
+                      if (activeTrace && resolvedQueryIdx >= activeTrace.tokens.length - 1) {
+                        setState((prev) => ({
+                          ...prev,
+                          queryIdx: Math.max(0, activeTrace.tokens.length - 4),
+                        }));
+                      }
+                      setBrokenZeroMask((v) => !v);
+                    }}
+                  >
+                    {brokenZeroMask ? 'Mask: 0 (Broken!)' : 'Test Mask = 0'}
+                  </button>
+                </>
               )}
 
               {(activeSceneBeat === 'attn-5-value-mixer' || activeSceneBeat === 'attn-6-multihead-full') && (
@@ -989,33 +1120,37 @@ export function App() {
                   </div>
                 )}
 
-              <div className="token-bar" aria-label="Select token">
-                <span className="hud-label">
-                  {activeSceneBeat === 'attn-2-dot-product' ? 'Compare Key:' : 'Inspect Token:'}
-                </span>
-                {activeTrace.tokens.map((tok, idx) => {
-                  const isQ = idx === resolvedQueryIdx;
-                  const isK = activeSceneBeat === 'attn-2-dot-product' && idx === resolvedKeyIdx;
-                  const disabledKey = activeSceneBeat === 'attn-2-dot-product' && idx > resolvedQueryIdx;
-                  return (
-                    <button
-                      key={`${tok.start}-${idx}`}
-                      type="button"
-                      disabled={disabledKey}
-                      className={`tok-btn mono ${isQ ? 'is-query' : ''} ${isK ? 'is-key' : ''}`}
-                      onClick={() =>
-                        setState((prev) =>
-                          activeSceneBeat === 'attn-2-dot-product'
-                            ? { ...prev, keyIdx: idx }
-                            : { ...prev, queryIdx: idx, keyIdx: null }
-                        )
-                      }
-                    >
-                      {formatToken(tok.text)}
-                    </button>
-                  );
-                })}
-              </div>
+              {showTokenBar && (
+                <div className="token-bar" aria-label="Select token">
+                  <span className="hud-label">
+                    {activeSceneBeat === 'attn-2-dot-product' ? 'Compare Key:' : 'Inspect Token:'}
+                  </span>
+                  {activeTrace.tokens.map((tok, idx) => {
+                    const isQ = idx === resolvedQueryIdx;
+                    const isK = activeSceneBeat === 'attn-2-dot-product' && idx === resolvedKeyIdx;
+                    const disabledKey = activeSceneBeat === 'attn-2-dot-product' && idx > resolvedQueryIdx;
+                    return (
+                      <button
+                        key={`${tok.start}-${idx}`}
+                        type="button"
+                        disabled={disabledKey}
+                        className={`tok-btn mono ${isQ ? 'is-query' : ''} ${isK ? 'is-key' : ''}`}
+                        onClick={() => {
+                          setPcaFocusVocabId(null);
+                          setState((prev) =>
+                            activeSceneBeat === 'attn-2-dot-product'
+                              ? { ...prev, keyIdx: idx }
+                              : { ...prev, queryIdx: idx, keyIdx: null }
+                          );
+                        }}
+                      >
+                        {formatToken(tok.text)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="camera-hint">
                 Drag to orbit · Right-drag or two-finger drag to pan · Scroll to zoom · Left/Right keys step beats
               </div>

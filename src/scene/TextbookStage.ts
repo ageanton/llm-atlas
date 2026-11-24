@@ -10,12 +10,14 @@ import type {
   TokenizerData,
 } from '../engine/types';
 import { isHeadDisabled } from '../state/bookState';
+import { softmax } from '../engine/transformer';
 import {
   computeDotProductBreakdown,
   createLabelSpriteTexture,
   divergingColor,
   formatNum,
   formatToken,
+  formatTokenExplicit,
   sequentialColor,
 } from '../utils/math';
 import type { BpeStepSnapshot, PcaCloudData } from '../utils/pass2Math';
@@ -23,9 +25,18 @@ import type { TrainingReplayData } from '../utils/pass3Math';
 import { buildChapter123Beat } from './pass2Builders';
 import { buildChapter5678Beat } from './pass3Builders';
 
+export interface HoverTooltip {
+  x: number;
+  y: number;
+  title: string;
+  detail: string;
+}
+
 export interface StageCallbacks {
   onPickToken: (index: number) => void;
   onPickHead: (head: number) => void;
+  onPickVocabToken: (vocabId: number) => void;
+  onHoverInfo: (tip: HoverTooltip | null) => void;
 }
 
 export interface StageSnapshot {
@@ -41,6 +52,9 @@ export interface StageSnapshot {
   tokenizer: TokenizerData;
   wteWeights: Float32Array | null;
   pcaCloud: PcaCloudData | null;
+  pcaFocusVocabId: number | null;
+  dotSweepDim: number;
+  brokenZeroMask: boolean;
   bpeSteps: BpeStepSnapshot[];
   bpeStepIdx: number;
   ropeSlotA: number;
@@ -56,8 +70,8 @@ export interface StageSnapshot {
 }
 
 interface ClickTag {
-  kind: 'token' | 'head';
-  index: number;
+  kind: 'token' | 'head' | 'pcaCloud' | 'dotDim';
+  index?: number;
 }
 
 export class TextbookStage {
@@ -83,6 +97,7 @@ export class TextbookStage {
   private isDragging = false;
 
   private lastBeat: SceneBeatId | null = null;
+  private currentSnap: StageSnapshot | null = null;
   private animFrameId = 0;
   private clock = new THREE.Clock();
   private pulseMeshes: THREE.Mesh[] = [];
@@ -144,6 +159,7 @@ export class TextbookStage {
     this.scene.add(this.stageRoot);
 
     this.renderer.domElement.addEventListener('pointermove', this.onPointerMove);
+    this.renderer.domElement.addEventListener('pointerleave', this.onPointerLeave);
     this.renderer.domElement.addEventListener('click', this.onClick);
     window.addEventListener('resize', this.onResize);
 
@@ -224,6 +240,7 @@ export class TextbookStage {
   }
 
   update(snap: StageSnapshot): void {
+    this.currentSnap = snap;
     if (this.lastBeat !== snap.beat) {
       this.lastBeat = snap.beat;
       this.setCameraForBeat(snap.beat);
@@ -460,7 +477,7 @@ export class TextbookStage {
     }
   }
 
-  // BEAT 2: ONE single Q · K / sqrt(32) comparison — 3 parallel 32-bar strips
+  // BEAT 2: ONE single Q · K / sqrt(32) comparison — kinetic & hoverable 32-bar strips
   private buildBeat2DotProduct(
     snap: StageSnapshot,
     active: ActiveLayerTrace
@@ -471,6 +488,11 @@ export class TextbookStage {
     const breakdown = computeDotProductBreakdown(qVec, kVec);
 
     const D = breakdown.dim;
+    const limit = Math.max(1, Math.min(D, snap.dotSweepDim));
+    let runningDot = 0;
+    for (let d = 0; d < limit; d++) runningDot += breakdown.products[d];
+    const runningScaled = runningDot / breakdown.scaleDivisor;
+
     const stripW = 7.4;
     const step = stripW / D;
     const barGeo = this.trackGeo(new THREE.BoxGeometry(step * 0.72, 1, 0.22));
@@ -488,7 +510,6 @@ export class TextbookStage {
       maxAbs: number,
       scaleH: number
     ) => {
-      // Base rail
       const rail = new THREE.Mesh(
         this.trackGeo(new THREE.BoxGeometry(stripW + 0.2, 0.05, 0.3)),
         this.trackMat(new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.7 }))
@@ -500,51 +521,58 @@ export class TextbookStage {
         const v = values[d];
         const norm = v / maxAbs;
         const h = Math.max(0.05, Math.abs(norm) * scaleH);
+        const hiddenAhead = d >= limit;
+        const isFrontier = limit < D && d === limit - 1;
         const bar = new THREE.Mesh(
           barGeo,
           this.trackMat(
             new THREE.MeshStandardMaterial({
               color: divergingColor(norm),
+              emissive: isFrontier ? '#f59e0b' : '#000000',
+              emissiveIntensity: isFrontier ? 0.55 : 0,
               roughness: 0.3,
+              transparent: hiddenAhead,
+              opacity: hiddenAhead ? 0.14 : 1.0,
             })
           )
         );
         const x = -stripW / 2 + (d + 0.5) * step;
         bar.scale.y = h;
         bar.position.set(x, v >= 0 ? h / 2 : -h / 2, zPos);
-        bar.castShadow = true;
+        bar.castShadow = !hiddenAhead;
+        bar.userData = { kind: 'dotDim', index: d } satisfies ClickTag;
         this.stageRoot.add(bar);
+        this.interactives.push(bar);
       }
     };
 
-    // Back rail: Query vector Q[queryIdx] (32 dims)
     buildStrip(qVec, -1.55, maxQK, 1.05);
     this.addLabel(
       `Query: “${formatToken(tokens[snap.queryIdx].text)}”`,
-      '32 numbers (what I look for)',
-      [-3.1, 1.48, -1.55],
-      2.35,
+      '32 dims · hover any bar to inspect',
+      [-2.9, 1.48, -1.55],
+      2.4,
       '#1d4ed8'
     );
 
-    // Front rail: Key vector K[keyIdx] (32 dims)
     buildStrip(kVec, 1.55, maxQK, 1.05);
     this.addLabel(
       `Key: “${formatToken(tokens[snap.keyIdx].text)}”`,
-      '32 numbers (what I advertise)',
-      [-3.1, 1.48, 1.55],
-      2.35,
+      '32 dims · hover any bar to inspect',
+      [-2.9, 1.48, 1.55],
+      2.4,
       '#0f766e'
     );
 
-    // Center rail: Element-wise products q[d] * k[d]
     buildStrip(breakdown.products, 0, maxProd, 1.35);
     this.addLabel(
-      `Match Score = ${formatNum(breakdown.scaledScore, 3)}`,
-      `sum(${formatNum(breakdown.rawDot, 2)}) ÷ √32`,
-      [2.6, 1.85, 0],
-      2.55,
-      breakdown.scaledScore >= 0 ? '#b45309' : '#1d4ed8'
+      limit < D
+        ? `Running Score (${limit}/32) = ${formatNum(runningScaled, 3)}`
+        : `Match Score = ${formatNum(breakdown.scaledScore, 3)}`,
+      `sum(${formatNum(runningDot, 2)}) ÷ √32`,
+      [2.5, 1.88, 0],
+      2.65,
+      runningScaled >= 0 ? '#b45309' : '#1d4ed8'
     );
   }
 
@@ -560,6 +588,10 @@ export class TextbookStage {
     const rawRow = active.attn.rawScores[snap.head][qIdx];
     const softRow = active.attn.attnWeights[snap.head][qIdx];
     const showSoftmax = applyMaskAndSoftmax && !snap.showPreSoftmax;
+    const brokenActive = applyMaskAndSoftmax && snap.brokenZeroMask && qIdx < T - 1;
+    const activeSoftRow = brokenActive
+      ? softmax(rawRow.map((v, c) => (c > qIdx ? 0 : v)))
+      : softRow;
 
     const span = Math.min(9.0, Math.max(5.0, T * 0.64));
     const step = span / T;
@@ -583,7 +615,7 @@ export class TextbookStage {
 
     let bestCol = 0;
     for (let c = 1; c <= qIdx; c++) {
-      if (softRow[c] > softRow[bestCol]) bestCol = c;
+      if (activeSoftRow[c] > activeSoftRow[bestCol]) bestCol = c;
     }
 
     for (let c = 0; c < T; c++) {
@@ -591,6 +623,25 @@ export class TextbookStage {
       const isFuture = c > qIdx;
 
       if (applyMaskAndSoftmax && isFuture) {
+        if (brokenActive) {
+          const leakedP = activeSoftRow[c];
+          const lh = showSoftmax ? Math.max(0.12, leakedP * 3.1) : 0.14;
+          const leakBar = new THREE.Mesh(
+            barGeo,
+            this.trackMat(
+              new THREE.MeshStandardMaterial({
+                color: '#dc2626',
+                emissive: '#991b1b',
+                emissiveIntensity: 0.25,
+                roughness: 0.3,
+              })
+            )
+          );
+          leakBar.scale.y = lh;
+          leakBar.position.set(x, lh / 2, 0);
+          this.stageRoot.add(leakBar);
+          continue;
+        }
         // Opaque matte Causal Mask shutter over future tokens
         const shutter = new THREE.Mesh(
           this.trackGeo(new RoundedBoxGeometry(barW * 1.06, 0.9, 0.72, 2, 0.04)),
@@ -611,7 +662,7 @@ export class TextbookStage {
       }
 
       const raw = rawRow[c];
-      const prob = softRow[c];
+      const prob = activeSoftRow[c];
       const h = showSoftmax
         ? Math.max(0.06, prob * 3.1)
         : Math.max(0.08, (Math.abs(raw) / maxAbsRaw) * 1.85);
@@ -655,14 +706,25 @@ export class TextbookStage {
     if (applyMaskAndSoftmax && qIdx < T - 1) {
       const firstFutureX = -span / 2 + (qIdx + 1.5) * step;
       const lastFutureX = -span / 2 + (T - 0.5) * step;
-      this.addLabel(
-        'Causal Mask (-∞)',
-        'Future blocked → 0.0%',
-        [(firstFutureX + lastFutureX) / 2, 1.32, 0],
-        1.95,
-        '#64748b',
-        true
-      );
+      if (brokenActive) {
+        const stolen = activeSoftRow.slice(qIdx + 1).reduce((a, b) => a + b, 0) * 100;
+        this.addLabel(
+          'MASK BROKEN (0 ≠ -∞)!',
+          `exp(0)=1 → ${stolen.toFixed(1)}% weight leaked to future`,
+          [(firstFutureX + lastFutureX) / 2, 1.55, 0],
+          2.35,
+          '#dc2626'
+        );
+      } else {
+        this.addLabel(
+          'Causal Mask (-∞)',
+          'Future blocked → 0.0%',
+          [(firstFutureX + lastFutureX) / 2, 1.32, 0],
+          1.95,
+          '#64748b',
+          true
+        );
+      }
     }
 
     this.addLabel(
@@ -883,7 +945,9 @@ export class TextbookStage {
     );
   }
 
-  private pickTag(event: PointerEvent | MouseEvent): ClickTag | null {
+  private pickHit(
+    event: PointerEvent | MouseEvent
+  ): { tag: ClickTag; instanceId?: number } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -891,21 +955,79 @@ export class TextbookStage {
     const hits = this.raycaster.intersectObjects(this.interactives, false);
     for (const hit of hits) {
       const tag = hit.object.userData as ClickTag | undefined;
-      if (tag?.kind) return tag;
+      if (tag?.kind) return { tag, instanceId: hit.instanceId };
     }
     return null;
   }
 
+  private readonly onPointerLeave = (): void => {
+    this.callbacks.onHoverInfo(null);
+  };
+
   private readonly onPointerMove = (event: PointerEvent): void => {
-    const hit = this.pickTag(event);
-    this.renderer.domElement.style.cursor = hit ? 'pointer' : 'grab';
+    const picked = this.pickHit(event);
+    this.renderer.domElement.style.cursor = picked ? 'pointer' : 'grab';
+    if (!picked || !this.currentSnap) {
+      this.callbacks.onHoverInfo(null);
+      return;
+    }
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    if (
+      picked.tag.kind === 'pcaCloud' &&
+      typeof picked.instanceId === 'number' &&
+      this.currentSnap.pcaCloud
+    ) {
+      const pt = this.currentSnap.pcaCloud.points[picked.instanceId];
+      if (pt) {
+        this.callbacks.onHoverInfo({
+          x,
+          y,
+          title: `“${formatTokenExplicit(pt.text)}” · ID #${pt.id}`,
+          detail: `||wte|| = ${pt.norm.toFixed(3)} · Click sphere for 128D neighbors`,
+        });
+        return;
+      }
+    }
+
+    if (
+      picked.tag.kind === 'dotDim' &&
+      typeof picked.tag.index === 'number'
+    ) {
+      const lt = this.currentSnap.traceRes.trace.layers[this.currentSnap.layer];
+      if (!lt.skipped) {
+        const d = picked.tag.index;
+        const qVal = lt.attn.q[this.currentSnap.head][this.currentSnap.queryIdx][d];
+        const kVal = lt.attn.k[this.currentSnap.head][this.currentSnap.keyIdx][d];
+        this.callbacks.onHoverInfo({
+          x,
+          y,
+          title: `Dimension d = ${d}`,
+          detail: `q(${formatNum(qVal, 3)}) × k(${formatNum(kVal, 3)}) = ${formatNum(qVal * kVal, 4)}`,
+        });
+        return;
+      }
+    }
+
+    this.callbacks.onHoverInfo(null);
   };
 
   private readonly onClick = (event: MouseEvent): void => {
-    const hit = this.pickTag(event);
-    if (!hit) return;
-    if (hit.kind === 'token') this.callbacks.onPickToken(hit.index);
-    else if (hit.kind === 'head') this.callbacks.onPickHead(hit.index);
+    const picked = this.pickHit(event);
+    if (!picked) return;
+    if (picked.tag.kind === 'token' && typeof picked.tag.index === 'number') {
+      this.callbacks.onPickToken(picked.tag.index);
+    } else if (picked.tag.kind === 'head' && typeof picked.tag.index === 'number') {
+      this.callbacks.onPickHead(picked.tag.index);
+    } else if (
+      picked.tag.kind === 'pcaCloud' &&
+      typeof picked.instanceId === 'number'
+    ) {
+      this.callbacks.onPickVocabToken(picked.instanceId);
+    }
   };
 
   private readonly onResize = (): void => {
@@ -949,6 +1071,7 @@ export class TextbookStage {
     cancelAnimationFrame(this.animFrameId);
     window.removeEventListener('resize', this.onResize);
     this.renderer.domElement.removeEventListener('pointermove', this.onPointerMove);
+    this.renderer.domElement.removeEventListener('pointerleave', this.onPointerLeave);
     this.renderer.domElement.removeEventListener('click', this.onClick);
     this.clearStage();
     this.controls.dispose();
